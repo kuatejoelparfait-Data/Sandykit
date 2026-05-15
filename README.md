@@ -1,93 +1,82 @@
-# SANDYKIT
+# SANDYKIT v2
 
-CLI interactif TypeScript/Node.js qui guide un développeur à travers la création complète d'un projet logiciel via des échanges conversationnels. Intègre Claude (Anthropic) et ChatGPT (OpenAI).
+Installateur de slash commands spec-driven pour agents IA (Claude Code, Cursor, GitHub Copilot).
 
-## Installation depuis GitHub
+## Installation
 
 ```bash
-git clone <url-du-repo>
-cd SANDYKIT
+git clone https://github.com/kuatejoelparfait-Data/Sandykit.git
+cd Sandykit
 npm install
 npm run build
 npm link
 ```
 
-Après `npm link`, la commande `sandykit` est disponible globalement.
+## Utilisation
 
-## Premier démarrage
-
-```bash
-sandykit new
-```
-
-Au premier lancement (ou si aucune clé API n'est configurée), SANDYKIT te demandera :
-
-1. **Provider LLM** : Claude (Anthropic) ou ChatGPT (OpenAI)
-2. **Clé API** : entrée masquée dans le terminal
-3. **Modèle** : ex. `claude-sonnet-4-6` ou `gpt-4o` (Entrée = défaut)
-4. **Langue** : Français ou English
-
-Ensuite tu choisis le **mode** :
-- **Chat** — dialogue guidé étape par étape (recommandé pour projets complexes)
-- **Auto** — génération rapide en une seule passe
-
-## Commandes disponibles
+### 1. Initialiser dans ton projet
 
 ```bash
-sandykit new        # Démarrer un nouveau projet
-sandykit resume     # Reprendre un projet en cours
-sandykit list       # Lister tous les projets créés
-sandykit config     # Reconfigurer le provider / clé API
+cd mon-projet
+sandykit init --integration claude
+# ou plusieurs agents :
+sandykit init --integration claude,cursor,copilot
 ```
 
-## Variables d'environnement (optionnel)
+### 2. Utiliser les commandes dans ton agent IA
 
-Au lieu d'entrer la clé dans la CLI, tu peux la définir en env :
+Ouvre Claude Code, Cursor ou GitHub Copilot dans le projet, puis :
+
+```
+/sandykit.specify    Décrire une nouvelle feature
+/sandykit.clarify    Affiner une spec floue
+/sandykit.plan       Générer le plan technique
+/sandykit.tasks      Décomposer en tâches
+/sandykit.implement  Implémenter les tâches
+/sandykit.review     Réviser le code
+```
+
+### 3. Surveiller le pipeline
 
 ```bash
-# Pour Claude
-export SANDYKIT_CLAUDE_KEY=sk-ant-...
-
-# Pour OpenAI
-export SANDYKIT_OPENAI_KEY=sk-...
+sandykit watch    # surveille specs/ et valide l'ordre
+sandykit status   # affiche l'état de toutes les features
+sandykit list     # liste les features
 ```
 
-## Pipeline de création
-
-SANDYKIT guide à travers 6 étapes :
-
-| Étape | Livrable |
-|-------|---------|
-| `/vision` | `vision.md` — description, utilisateurs, problème |
-| `/spec` | `spec.md` — cahier des charges complet |
-| `/stack` | `stack.md` — stack technique justifié |
-| `/architect` | `architecture.md` — composants, data model, API |
-| `/tasks` | `tasks.md` — plan de tâches ordonné |
-| `/scaffold` | Structure de fichiers + boilerplate |
-
-## Domaines supportés
-
-- **Web** — React + Vite + TypeScript
-- **API REST** — Express + TypeScript
-- **Data / ML** — Python + Jupyter + pandas
-- **Mobile** — React Native + Expo
-- **CLI Tool** — Node.js + commander + esbuild
-
-## Fichiers générés
-
-Tous les fichiers sont sauvegardés dans `~/.sandykit/projects/<project-id>/` :
+## Structure générée dans ton projet
 
 ```
-~/.sandykit/projects/mon-projet/
-├── session.json        # État de la session (resumable)
-├── vision.md
-├── spec.md
-├── stack.md
-├── architecture.md
-├── tasks.md
-└── scaffold/           # Code boilerplate du projet
-    └── ...
+mon-projet/
+├── .sandykit/
+│   └── config.json
+├── .claude/
+│   └── commands/          # Claude Code
+│       ├── sandykit.specify.md
+│       ├── sandykit.clarify.md
+│       ├── sandykit.plan.md
+│       ├── sandykit.tasks.md
+│       ├── sandykit.implement.md
+│       └── sandykit.review.md
+├── .cursor/
+│   └── rules/             # Cursor
+├── .github/
+│   └── instructions/      # GitHub Copilot
+└── specs/
+    └── 001-auth-jwt/
+        ├── spec.md
+        ├── plan.md
+        ├── tasks.md
+        └── review.md
 ```
+
+## Pipeline spec-driven
+
+```
+/sandykit.specify → /sandykit.clarify (optionnel) → /sandykit.plan → /sandykit.tasks → /sandykit.implement → /sandykit.review
+```
+
+Le watcher (`sandykit watch`) valide l'ordre et affiche une alerte si tu sautes une étape.
 
 ## Tests
 
@@ -95,14 +84,4 @@ Tous les fichiers sont sauvegardés dans `~/.sandykit/projects/<project-id>/` :
 npm test
 ```
 
-## Tech Stack de SANDYKIT
-
-| Composant | Choix |
-|-----------|-------|
-| Language | TypeScript 5 |
-| Runtime | tsx (dev) + esbuild (build) |
-| CLI framework | commander.js |
-| Prompts | @clack/prompts |
-| Affichage | chalk + boxen |
-| LLM | @anthropic-ai/sdk + openai |
-| Tests | vitest |
+18 tests — config, installer, watcher, CLI.

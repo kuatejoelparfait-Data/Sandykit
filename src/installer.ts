@@ -3,9 +3,12 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import type { Integration } from './types.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const TEMPLATES_DIR = join(__dirname, 'templates', 'commands');
+// CJS-compatible __dirname: works both in ESM (via import.meta.url) and CJS (native __dirname)
+const _dirname: string =
+  typeof __dirname !== 'undefined'
+    ? __dirname
+    : dirname(fileURLToPath((import.meta as { url?: string }).url ?? ''));
+const TEMPLATES_DIR = join(_dirname, 'templates', 'commands');
 
 const COMMANDS = ['specify', 'clarify', 'plan', 'tasks', 'implement', 'review'] as const;
 

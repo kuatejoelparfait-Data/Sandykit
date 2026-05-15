@@ -7,7 +7,7 @@ await build({
   target: 'node18',
   format: 'cjs',
   outfile: 'dist/cli.cjs',
-  external: ['@anthropic-ai/sdk', 'openai', '@clack/prompts', 'conf'],
+  external: ['@anthropic-ai/sdk', 'openai', '@clack/prompts', 'conf', 'chokidar'],
   banner: {
     js: '#!/usr/bin/env node',
   },
