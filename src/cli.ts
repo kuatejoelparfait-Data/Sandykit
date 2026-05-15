@@ -1,193 +1,134 @@
 import { Command } from 'commander';
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
-import { banner } from './ui/display.js';
-import { ConfigManager } from './config.js';
-import { runChatMode } from './modes/chat.js';
-import { runAutoMode } from './modes/auto.js';
-import { listSessions, loadSession } from './session/store.js';
-import type { LLMProviderName } from './llm/factory.js';
-import type { Language } from './llm/types.js';
+import boxen from 'boxen';
+import { saveConfig, loadConfig } from './config.js';
+import { install } from './installer.js';
+import { startWatcher, getAllFeatureStatuses } from './watcher.js';
+import type { Integration, FeatureStatus } from './types.js';
+
+export function buildStatusDisplay(features: FeatureStatus[]): string {
+  if (features.length === 0) {
+    return chalk.yellow('Aucune feature trouvée dans specs/');
+  }
+
+  const lines = features.map(f => {
+    const stages = [
+      f.hasSpec     ? chalk.green('spec ✓')   : chalk.dim('spec ○'),
+      f.hasPlan     ? chalk.green('plan ✓')   : chalk.dim('plan ○'),
+      f.hasTasks    ? chalk.green('tasks ✓')  : chalk.dim('tasks ○'),
+      f.hasImplement? chalk.green('impl ✓')   : chalk.dim('impl ○'),
+      f.hasReview   ? chalk.green('review ✓') : chalk.dim('review ○'),
+    ];
+    return `  ${chalk.cyan(f.id.padEnd(25))} ${stages.join('  ')}`;
+  });
+
+  return lines.join('\n');
+}
 
 const program = new Command();
 
 program
   .name('sandykit')
-  .description('CLI interactif pour créer des projets logiciels complets via la conversation')
-  .version('1.0.0');
-
-async function promptForProviderSetup(cfg: ConfigManager): Promise<void> {
-  p.intro(chalk.cyan('Configuration du provider LLM'));
-
-  const provider = await p.select<LLMProviderName>({
-    message: 'Quel provider LLM veux-tu utiliser ?',
-    options: [
-      { value: 'claude', label: 'Claude (Anthropic)', hint: 'Recommandé' },
-      { value: 'openai', label: 'ChatGPT (OpenAI)' },
-    ],
-  });
-
-  if (p.isCancel(provider)) {
-    p.cancel('Configuration annulée');
-    process.exit(0);
-  }
-
-  cfg.setProvider(provider as LLMProviderName);
-
-  const keyLabel =
-    provider === 'claude'
-      ? 'Clé API Anthropic (sk-ant-...) :'
-      : 'Clé API OpenAI (sk-...) :';
-
-  const apiKey = await p.password({ message: keyLabel });
-
-  if (p.isCancel(apiKey) || !apiKey) {
-    p.cancel('Clé API requise');
-    process.exit(1);
-  }
-
-  if (provider === 'claude') {
-    cfg.setClaudeApiKey(apiKey as string);
-  } else {
-    cfg.setOpenAIApiKey(apiKey as string);
-  }
-
-  const modelDefaults: Record<string, string> = {
-    claude: 'claude-sonnet-4-6',
-    openai: 'gpt-4o',
-  };
-
-  const model = await p.text({
-    message: 'Modèle à utiliser (Entrée pour défaut) :',
-    placeholder: modelDefaults[provider as string] ?? '',
-  });
-
-  if (!p.isCancel(model) && model) {
-    cfg.setModel(model as string);
-  }
-
-  const lang = await p.select<Language>({
-    message: 'Langue des échanges :',
-    options: [
-      { value: 'fr', label: 'Français' },
-      { value: 'en', label: 'English' },
-    ],
-  });
-
-  if (!p.isCancel(lang)) {
-    cfg.setLanguage(lang as Language);
-  }
-
-  p.outro(chalk.green('Configuration sauvegardée !'));
-}
+  .description('Installateur de commandes spec-driven pour agents IA')
+  .version('2.0.0');
 
 program
-  .command('new')
-  .description('Démarrer un nouveau projet')
-  .action(async () => {
-    banner();
-    p.intro(chalk.cyan('Nouveau projet SANDYKIT'));
+  .command('init [projet]')
+  .description('Initialiser SANDYKIT dans le projet courant')
+  .option('--integration <liste>', 'Intégrations : claude,cursor,copilot', 'claude')
+  .action(async (projet: string | undefined, opts: { integration: string }) => {
+    console.log(
+      boxen(
+        chalk.bold.cyan('SANDYKIT') + ' v2\n' +
+        chalk.dim('Spec-Driven Development pour agents IA'),
+        { padding: 1, margin: 1, borderStyle: 'round', borderColor: 'cyan' }
+      )
+    );
 
-    const cfg = new ConfigManager();
+    p.intro(chalk.cyan('Initialisation'));
 
-    if (!cfg.hasApiKey()) {
-      await promptForProviderSetup(cfg);
+    const integrations = opts.integration.split(',').map(s => s.trim()) as Integration[];
+    const valid: Integration[] = ['claude', 'cursor', 'copilot'];
+    const invalid = integrations.filter(i => !valid.includes(i));
+
+    if (invalid.length > 0) {
+      p.cancel(`Intégrations invalides : ${invalid.join(', ')}. Valeurs : claude, cursor, copilot`);
+      process.exit(1);
     }
 
-    const mode = await p.select({
-      message: 'Quel mode de création ?',
-      options: [
-        {
-          value: 'chat',
-          label: 'Mode Chat',
-          hint: 'Dialogue guidé, étape par étape',
-        },
-        {
-          value: 'auto',
-          label: 'Mode Auto',
-          hint: 'Génération rapide en une seule passe',
-        },
-      ],
-    });
+    const projectName = projet ?? process.cwd().split(/[/\\]/).pop() ?? 'mon-projet';
 
-    if (p.isCancel(mode)) {
-      p.cancel('Annulé');
-      process.exit(0);
-    }
+    const spinner = p.spinner();
+    spinner.start('Installation des commandes...');
+    await install(integrations);
+    saveConfig({ projectName, integrations });
+    spinner.stop('Commandes installées');
 
-    if (mode === 'chat') {
-      await runChatMode(cfg);
-    } else {
-      await runAutoMode(cfg);
-    }
+    const agentPaths: Record<string, string> = {
+      claude:  '.claude/commands/',
+      cursor:  '.cursor/rules/',
+      copilot: '.github/instructions/',
+    };
+
+    p.note(
+      integrations.map(i => `${chalk.bold(i)} → ${chalk.dim(agentPaths[i] ?? '')}`).join('\n'),
+      'Intégrations installées'
+    );
+
+    p.note(
+      [
+        '/sandykit.specify    Décrire une nouvelle feature',
+        '/sandykit.clarify    Affiner une spec floue',
+        '/sandykit.plan       Générer le plan technique',
+        '/sandykit.tasks      Décomposer en tâches',
+        '/sandykit.implement  Implémenter les tâches',
+        '/sandykit.review     Réviser le code',
+      ].join('\n'),
+      'Commandes disponibles dans ton agent IA'
+    );
+
+    p.outro(chalk.green(`✓ SANDYKIT prêt dans "${projectName}"`));
   });
 
 program
-  .command('resume')
-  .description('Reprendre un projet en cours')
-  .action(async () => {
-    banner();
-    const sessions = listSessions();
-    if (sessions.length === 0) {
-      console.log(chalk.yellow('Aucun projet en cours.'));
-      return;
-    }
+  .command('watch')
+  .description('Surveiller les specs et valider le pipeline')
+  .action(() => {
+    startWatcher();
+  });
 
-    const choice = await p.select({
-      message: 'Quel projet reprendre ?',
-      options: sessions.map(s => ({
-        value: s.id,
-        label: s.name,
-        hint: `${s.mode} — étape: ${s.currentStage} — ${new Date(s.updatedAt).toLocaleDateString()}`,
-      })),
-    });
-
-    if (p.isCancel(choice)) {
-      p.cancel('Annulé');
-      process.exit(0);
-    }
-
-    const session = loadSession(choice as string);
-    if (!session) {
-      console.log(chalk.red('Session introuvable.'));
-      return;
-    }
-
-    const cfg = new ConfigManager();
-    if (!cfg.hasApiKey()) await promptForProviderSetup(cfg);
-
-    if (session.mode === 'chat') {
-      await runChatMode(cfg);
-    } else {
-      await runAutoMode(cfg);
-    }
+program
+  .command('status')
+  .description("Afficher l'état des features en cours")
+  .action(() => {
+    const features = getAllFeatureStatuses('specs');
+    const cfg = loadConfig();
+    if (cfg) console.log(chalk.bold(`\nProjet : ${cfg.projectName}\n`));
+    console.log('─'.repeat(70));
+    console.log(buildStatusDisplay(features));
+    console.log('─'.repeat(70) + '\n');
   });
 
 program
   .command('list')
-  .description('Lister les projets créés')
+  .description('Lister toutes les features')
   .action(() => {
-    const sessions = listSessions();
-    if (sessions.length === 0) {
-      console.log(chalk.yellow('Aucun projet trouvé.'));
+    const features = getAllFeatureStatuses('specs');
+    if (features.length === 0) {
+      console.log(chalk.yellow('Aucune feature trouvée.'));
       return;
     }
-    console.log(chalk.bold('\nProjets SANDYKIT :\n'));
-    for (const s of sessions) {
-      console.log(
-        chalk.cyan(`  ${s.name}`) +
-          chalk.dim(` [${s.mode}] [${s.currentStage}] — ${new Date(s.updatedAt).toLocaleDateString()}`)
-      );
+    console.log(chalk.bold('\nFeatures :\n'));
+    for (const f of features) {
+      const done = [f.hasSpec, f.hasPlan, f.hasTasks, f.hasImplement, f.hasReview]
+        .filter(Boolean).length;
+      console.log(`  ${chalk.cyan(f.id)} — ${done}/5 étapes`);
     }
     console.log();
   });
 
-program
-  .command('config')
-  .description('Configurer le provider LLM et la clé API')
-  .action(async () => {
-    const cfg = new ConfigManager();
-    await promptForProviderSetup(cfg);
-  });
-
-program.parse();
+// Only parse CLI args when run directly (not when imported by tests)
+if (process.argv[1] && (process.argv[1].endsWith('cli.ts') || process.argv[1].endsWith('cli.js') || process.argv[1].endsWith('cli.cjs'))) {
+  program.parse();
+}
