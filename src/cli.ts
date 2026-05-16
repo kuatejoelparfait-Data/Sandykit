@@ -41,11 +41,17 @@ async function runInit(projet: string | undefined, opts: { integration: string }
 
   const valid: Integration[] = ['claude', 'cursor', 'copilot'];
 
-  // Étape 1 : nom du projet (avec retour possible)
+  const agentOptions = [
+    { value: 'claude'  as Integration, label: 'Claude Code',     hint: '.claude/commands/' },
+    { value: 'cursor'  as Integration, label: 'Cursor',           hint: '.cursor/rules/' },
+    { value: 'copilot' as Integration, label: 'GitHub Copilot',  hint: '.github/instructions/' },
+  ];
+
   let projectName: string;
   let integrations: Integration[];
 
-  while (true) {
+  // Boucle principale — retour au nom du projet
+  outerLoop: while (true) {
     const nameResult = await p.text({
       message: 'Nom du projet :',
       placeholder: projet ?? process.cwd().split(/[/\\]/).pop() ?? 'mon-projet',
@@ -54,37 +60,56 @@ async function runInit(projet: string | undefined, opts: { integration: string }
     if (p.isCancel(nameResult)) { p.cancel('Annulé'); process.exit(0); }
     projectName = nameResult as string;
 
-    // Étape 2 : choix des intégrations
-    const intResult = await p.multiselect<Integration>({
-      message: 'Agents IA à intégrer : (espace pour sélectionner, entrée pour valider)',
-      options: [
-        { value: 'claude',  label: 'Claude Code',      hint: '.claude/commands/' },
-        { value: 'cursor',  label: 'Cursor',            hint: '.cursor/rules/' },
-        { value: 'copilot', label: 'GitHub Copilot',   hint: '.github/instructions/' },
-      ],
-      initialValues: opts.integration !== 'claude'
-        ? (opts.integration.split(',').filter(i => valid.includes(i as Integration)) as Integration[])
-        : ['claude'],
-      required: true,
-    });
-    if (p.isCancel(intResult)) { p.cancel('Annulé'); process.exit(0); }
-    integrations = intResult as Integration[];
+    // Boucle interne — retour au choix des agents uniquement
+    while (true) {
+      const intResult = await p.multiselect<Integration>({
+        message: 'Agents IA à intégrer : (espace = sélectionner, entrée = valider)',
+        options: agentOptions,
+        initialValues: opts.integration !== 'claude'
+          ? (opts.integration.split(',').filter(i => valid.includes(i as Integration)) as Integration[])
+          : ['claude'],
+        required: true,
+      });
+      if (p.isCancel(intResult)) { p.cancel('Annulé'); process.exit(0); }
+      integrations = intResult as Integration[];
 
-    // Étape 3 : confirmation avec option retour
-    const confirm = await p.select({
-      message: `Confirmer : "${projectName}" avec ${integrations.join(', ')} ?`,
-      options: [
-        { value: 'confirm', label: '✓ Confirmer et installer' },
-        { value: 'back',    label: '← Recommencer' },
-        { value: 'cancel',  label: '✗ Annuler' },
-      ],
-    });
-    if (p.isCancel(confirm) || confirm === 'cancel') { p.cancel('Annulé'); process.exit(0); }
-    if (confirm === 'back') {
-      console.log(chalk.dim('\nRetour au début...\n'));
-      continue;
+      const agentLabels = integrations
+        .map(i => agentOptions.find(o => o.value === i)?.label ?? i)
+        .join(', ');
+
+      const confirm = await p.select({
+        message: `Projet "${projectName}" · Agents : ${agentLabels}`,
+        options: [
+          { value: 'confirm', label: '✓  Confirmer et installer' },
+          { value: 'agents',  label: '↩  Choisir un autre agent' },
+          { value: 'restart', label: '⟳  Recommencer depuis le début' },
+          { value: 'cancel',  label: '✗  Annuler' },
+        ],
+      });
+
+      if (p.isCancel(confirm) || confirm === 'cancel') {
+        const sure = await p.confirm({
+          message: 'Voulez-vous vraiment annuler ?',
+          initialValue: false,
+        });
+        if (p.isCancel(sure) || sure) { p.cancel('Annulé'); process.exit(0); }
+        // réponse "non" → on reste dans la boucle, on réaffiche la confirmation
+        continue;
+      }
+
+      if (confirm === 'restart') {
+        console.log(chalk.dim('\nRetour au début...\n'));
+        continue outerLoop;
+      }
+
+      if (confirm === 'agents') {
+        console.log(chalk.dim('\nRetour au choix des agents...\n'));
+        continue;
+      }
+
+      // confirm === 'confirm'
+      break outerLoop;
     }
-    break;
   }
 
   const spinner = p.spinner();
