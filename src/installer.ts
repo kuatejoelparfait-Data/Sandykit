@@ -10,7 +10,7 @@ const _dirname: string =
     : dirname(fileURLToPath((import.meta as { url?: string }).url ?? ''));
 const TEMPLATES_DIR = join(_dirname, 'templates', 'commands');
 
-const COMMANDS = ['specify', 'clarify', 'plan', 'tasks', 'implement', 'review'] as const;
+const COMMANDS = ['specify', 'clarify', 'plan', 'tasks', 'implement', 'review', 'back'] as const;
 
 interface IntegrationPaths {
   commandsDir: string;
