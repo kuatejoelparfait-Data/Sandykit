@@ -65,9 +65,7 @@ async function runInit(projet: string | undefined, opts: { integration: string }
       const intResult = await p.multiselect<Integration>({
         message: 'Agents IA à intégrer : (espace = sélectionner, entrée = valider)',
         options: agentOptions,
-        initialValues: opts.integration !== 'claude'
-          ? (opts.integration.split(',').filter(i => valid.includes(i as Integration)) as Integration[])
-          : ['claude'],
+        initialValues: [],
         required: true,
       });
       if (p.isCancel(intResult)) { p.cancel('Annulé'); process.exit(0); }
