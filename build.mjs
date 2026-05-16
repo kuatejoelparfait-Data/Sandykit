@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { cpSync, mkdirSync } from 'fs';
 
 await build({
   entryPoints: ['src/cli.ts'],
@@ -13,4 +14,8 @@ await build({
   },
 });
 
-console.log('Build complete → dist/cli.cjs');
+// Copy templates to dist/ so the installer can find them at runtime
+mkdirSync('dist/templates', { recursive: true });
+cpSync('src/templates', 'dist/templates', { recursive: true });
+
+console.log('Build complete → dist/cli.cjs + dist/templates/');
