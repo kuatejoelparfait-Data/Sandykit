@@ -6,9 +6,10 @@ import { saveConfig, loadConfig } from './config.js';
 import { install, getIntegrationPaths } from './installer.js';
 import { startWatcher, getAllFeatureStatuses } from './watcher.js';
 import type { Integration, FeatureStatus } from './types.js';
-import { mkdirSync, writeFileSync, existsSync, readdirSync, rmSync, copyFileSync } from 'fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, rmSync, copyFileSync, renameSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
 const _dirname: string =
   typeof __dirname !== 'undefined'
@@ -300,6 +301,210 @@ async function runExport(nom: string | undefined): Promise<void> {
   p.outro(chalk.green(`✓ Feature "${target}" exportée`));
 }
 
+async function runOpen(nom: string | undefined): Promise<void> {
+  showBanner();
+
+  const specsDir = join(process.cwd(), 'specs');
+  if (!existsSync(specsDir)) { p.cancel('Aucun dossier specs/ trouvé.'); process.exit(1); }
+
+  const features = readdirSync(specsDir).filter(d => /^\d{3}-/.test(d));
+  if (features.length === 0) { p.cancel('Aucune feature trouvée.'); process.exit(1); }
+
+  let target: string;
+  if (nom) {
+    const match = features.find(f => f.includes(nom));
+    if (!match) { p.cancel(`Feature "${nom}" non trouvée.`); process.exit(1); }
+    target = match;
+  } else {
+    const choice = await p.select({
+      message: 'Quelle feature ouvrir ?',
+      options: features.map(f => ({ value: f, label: f })),
+    });
+    if (p.isCancel(choice)) { p.cancel('Annulé'); process.exit(0); }
+    target = choice as string;
+  }
+
+  const featureDir = join(specsDir, target);
+  const platform = process.platform;
+  try {
+    if (platform === 'win32') execSync(`explorer "${featureDir}"`);
+    else if (platform === 'darwin') execSync(`open "${featureDir}"`);
+    else execSync(`xdg-open "${featureDir}"`);
+    console.log(chalk.green(`✓ Ouvert : specs/${target}/`));
+  } catch {
+    console.log(chalk.yellow(`Chemin : ${featureDir}`));
+  }
+}
+
+async function runRename(nom: string | undefined): Promise<void> {
+  showBanner();
+  p.intro(chalk.cyan('Renommer une feature'));
+
+  const specsDir = join(process.cwd(), 'specs');
+  if (!existsSync(specsDir)) { p.cancel('Aucun dossier specs/ trouvé.'); process.exit(1); }
+
+  const features = readdirSync(specsDir).filter(d => /^\d{3}-/.test(d));
+  if (features.length === 0) { p.cancel('Aucune feature trouvée.'); process.exit(1); }
+
+  let target: string;
+  if (nom) {
+    const match = features.find(f => f.includes(nom));
+    if (!match) { p.cancel(`Feature "${nom}" non trouvée.`); process.exit(1); }
+    target = match;
+  } else {
+    const choice = await p.select({
+      message: 'Quelle feature renommer ?',
+      options: features.map(f => ({ value: f, label: f })),
+    });
+    if (p.isCancel(choice)) { p.cancel('Annulé'); process.exit(0); }
+    target = choice as string;
+  }
+
+  const currentNum = target.slice(0, 3);
+  const currentName = target.slice(4);
+
+  const newNameResult = await p.text({
+    message: 'Nouveau nom (sans numéro) :',
+    placeholder: currentName,
+    validate: v => (v.trim().length === 0 ? 'Le nom est requis' : undefined),
+  });
+  if (p.isCancel(newNameResult)) { p.cancel('Annulé'); process.exit(0); }
+  const newName = (newNameResult as string).trim().toLowerCase().replace(/\s+/g, '-');
+
+  const newDirName = `${currentNum}-${newName}`;
+  if (newDirName === target) { p.cancel('Nom identique, rien à faire.'); process.exit(0); }
+
+  const oldPath = join(specsDir, target);
+  const newPath = join(specsDir, newDirName);
+
+  if (existsSync(newPath)) { p.cancel(`"${newDirName}" existe déjà.`); process.exit(1); }
+
+  const spinner = p.spinner();
+  spinner.start('Renommage...');
+  renameSync(oldPath, newPath);
+
+  // Update spec.md header if it exists
+  const specFile = join(newPath, 'spec.md');
+  if (existsSync(specFile)) {
+    const content = readFileSync(specFile, 'utf-8');
+    writeFileSync(specFile, content.replace(
+      /\*\*Dossier\*\* : `specs\/[^`]+`/,
+      `**Dossier** : \`specs/${newDirName}/\``
+    ), 'utf-8');
+  }
+  spinner.stop('Renommée');
+
+  p.outro(chalk.green(`✓ "${target}" → "${newDirName}"`));
+}
+
+async function runArchive(nom: string | undefined): Promise<void> {
+  showBanner();
+  p.intro(chalk.cyan('Archiver une feature'));
+
+  const specsDir = join(process.cwd(), 'specs');
+  if (!existsSync(specsDir)) { p.cancel('Aucun dossier specs/ trouvé.'); process.exit(1); }
+
+  const features = readdirSync(specsDir).filter(d => /^\d{3}-/.test(d));
+  if (features.length === 0) { p.cancel('Aucune feature trouvée.'); process.exit(1); }
+
+  let target: string;
+  if (nom) {
+    const match = features.find(f => f.includes(nom));
+    if (!match) { p.cancel(`Feature "${nom}" non trouvée.`); process.exit(1); }
+    target = match;
+  } else {
+    const choice = await p.select({
+      message: 'Quelle feature archiver ?',
+      options: features.map(f => ({ value: f, label: f })),
+    });
+    if (p.isCancel(choice)) { p.cancel('Annulé'); process.exit(0); }
+    target = choice as string;
+  }
+
+  const confirm = await p.confirm({
+    message: `Archiver "${target}" ? (déplacé hors de specs/)`,
+    initialValue: true,
+  });
+  if (p.isCancel(confirm) || !confirm) { p.cancel('Annulé'); process.exit(0); }
+
+  const archivesDir = join(process.cwd(), 'archives');
+  if (!existsSync(archivesDir)) mkdirSync(archivesDir, { recursive: true });
+
+  const src = join(specsDir, target);
+  const dest = join(archivesDir, target);
+
+  if (existsSync(dest)) { p.cancel(`"${target}" existe déjà dans archives/.`); process.exit(1); }
+
+  const spinner = p.spinner();
+  spinner.start('Archivage...');
+  renameSync(src, dest);
+  spinner.stop('Archivée');
+
+  p.outro(chalk.green(`✓ "${target}" déplacé dans archives/`));
+}
+
+function runDoctor(): void {
+  showBanner();
+  console.log(chalk.bold('Diagnostic SANDYKIT\n'));
+
+  const cwd = process.cwd();
+  const checks: Array<{ label: string; ok: boolean; detail?: string }> = [];
+
+  // Config
+  const cfg = loadConfig();
+  checks.push({ label: 'Configuration .sandykit/config.json', ok: cfg !== null, detail: cfg ? `projet: ${cfg.projectName}` : 'non trouvée — lance sandykit init' });
+
+  // specs/
+  const specsDir = join(cwd, 'specs');
+  checks.push({ label: 'Dossier specs/', ok: existsSync(specsDir) });
+
+  // Agent integrations
+  const agentPaths: Record<string, string> = {
+    claude:  join(cwd, '.claude', 'commands'),
+    cursor:  join(cwd, '.cursor', 'rules'),
+    copilot: join(cwd, '.github', 'instructions'),
+  };
+  const commands = ['specify', 'clarify', 'plan', 'tasks', 'implement', 'review', 'back'];
+  const extensions: Record<string, string> = { claude: '.md', cursor: '.mdc', copilot: '.instructions.md' };
+
+  if (cfg) {
+    for (const integration of cfg.integrations) {
+      const dir = agentPaths[integration];
+      checks.push({ label: `Dossier ${integration}`, ok: existsSync(dir), detail: dir.replace(cwd, '.') });
+
+      let missing = 0;
+      for (const cmd of commands) {
+        const file = join(dir, `sandykit.${cmd}${extensions[integration]}`);
+        if (!existsSync(file)) missing++;
+      }
+      checks.push({
+        label: `Commandes ${integration} (${commands.length - missing}/${commands.length})`,
+        ok: missing === 0,
+        detail: missing > 0 ? `${missing} manquante(s) — lance sandykit update` : undefined,
+      });
+    }
+  } else {
+    checks.push({ label: 'Intégrations agents', ok: false, detail: 'config manquante' });
+  }
+
+  // Print results
+  for (const { label, ok, detail } of checks) {
+    const icon = ok ? chalk.green('✓') : chalk.red('✗');
+    const text = ok ? chalk.white(label) : chalk.red(label);
+    const hint = detail ? chalk.dim(`  ${detail}`) : '';
+    console.log(`  ${icon}  ${text}${hint}`);
+  }
+
+  const allOk = checks.every(c => c.ok);
+  console.log();
+  if (allOk) {
+    console.log(chalk.green('✓ SANDYKIT est correctement configuré'));
+  } else {
+    console.log(chalk.yellow('⚠ Des éléments nécessitent attention (voir ci-dessus)'));
+  }
+  console.log();
+}
+
 const program = new Command();
 
 program
@@ -373,6 +578,26 @@ program
   .command('export [nom]')
   .description('Exporter les fichiers d\'une feature dans exports/')
   .action(runExport);
+
+program
+  .command('open [nom]')
+  .description("Ouvrir le dossier d'une feature dans l'explorateur")
+  .action(runOpen);
+
+program
+  .command('rename [nom]')
+  .description('Renommer une feature')
+  .action(runRename);
+
+program
+  .command('archive [nom]')
+  .description("Archiver une feature terminée dans archives/")
+  .action(runArchive);
+
+program
+  .command('doctor')
+  .description('Vérifier la configuration et les fichiers installés')
+  .action(runDoctor);
 
 // Only parse CLI args when run directly (not when imported by tests)
 if (process.argv[1] && (process.argv[1].endsWith('cli.ts') || process.argv[1].endsWith('cli.js') || process.argv[1].endsWith('cli.cjs'))) {
