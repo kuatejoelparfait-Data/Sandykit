@@ -26,7 +26,23 @@ interface DevState {
 const SYSTEM_SPEC     = `Tu es un expert en spécification fonctionnelle. Rédige des specs claires, orientées valeur utilisateur, sans détails d'implémentation. Chaque exigence doit être testable. Réponds uniquement en markdown.`;
 const SYSTEM_PLAN     = `Tu es un architecte logiciel senior. Génère un plan technique concis : stack, structure des dossiers, composants, flux de données. Réponds uniquement en markdown.`;
 const SYSTEM_TASKS    = `Tu es un tech lead. Décompose le plan en tâches ordonnées avec dépendances. Chaque tâche < 1 journée. Format : checkboxes markdown par composant.`;
-const SYSTEM_CODE     = `Tu es un développeur senior. Tu implémentes du code propre, complet, prêt à l'emploi. Pour chaque fichier utilise : ## Fichier: chemin/relatif\n\`\`\`\n[contenu]\n\`\`\``;
+const SYSTEM_CODE = `Tu es un développeur senior full-stack. Tu livres un projet COMPLET et FONCTIONNEL prêt à être lancé.
+
+RÈGLES ABSOLUES :
+- Génère TOUS les fichiers nécessaires sans exception
+- Toujours inclure : package.json (racine + chaque sous-projet), README.md, .env.example, .gitignore
+- Pour un backend : toutes les routes, controllers, models, middlewares, avec package.json complet et versions précises
+- Pour un frontend : toutes les pages et composants référencés, router configuré, index.html, vite.config ou équivalent
+- Code COMPLET dans chaque fichier — jamais de // TODO, jamais de placeholder, jamais de "reste du code ici"
+- .env.example avec toutes les variables d'env et des valeurs d'exemple réalistes
+- README.md avec : description, prérequis, installation, lancement, structure du projet
+- Commence par lister TOUS les fichiers que tu vas créer (plan de fichiers), puis génère-les un par un dans l'ordre
+
+FORMAT OBLIGATOIRE pour chaque fichier :
+## Fichier: chemin/relatif/depuis/racine.ext
+\`\`\`
+[contenu complet du fichier]
+\`\`\``;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -357,7 +373,32 @@ async function stepImplement(provider: ReturnType<typeof createProvider>, state:
 
   const spinner = p.spinner();
   spinner.start('Implémentation en cours...');
-  const prompt = `Spec :\n${state.spec}\n\nPlan :\n${state.plan}\n\nTâches :\n${state.tasks}${additions ? `\n\nPrécisions :\n${additions}` : ''}\n\nImplémente le projet complet. Pour chaque fichier :\n\n## Fichier: chemin/relatif/fichier.ext\n\`\`\`\n[contenu]\n\`\`\`\n\nGénère TOUS les fichiers pour un projet fonctionnel.`;
+  const prompt = [
+    'Tu dois implémenter un projet complet et livrable.',
+    '',
+    '## Spécification fonctionnelle',
+    state.spec,
+    '',
+    '## Plan technique',
+    state.plan,
+    '',
+    '## Tâches',
+    state.tasks,
+    additions ? `\n## Précisions supplémentaires\n${additions}` : '',
+    '',
+    '## Instructions impératives',
+    '1. Liste dabord TOUS les fichiers que tu vas créer (liste complète)',
+    '2. Génère ensuite chaque fichier en entier, sans rien omettre',
+    '3. Inclus OBLIGATOIREMENT : package.json pour chaque module, README.md, .env.example, .gitignore',
+    '4. Chaque fichier doit être complet — pas de placeholder, pas de TODO, pas de "reste du code"',
+    '5. Les imports doivent correspondre exactement aux fichiers créés',
+    '',
+    'FORMAT pour chaque fichier :',
+    '## Fichier: chemin/relatif/depuis/racine.ext',
+    '```',
+    '[contenu complet]',
+    '```',
+  ].join('\n');
   spinner.stop('Code généré :');
 
   const code = await streamToConsole(provider, prompt, SYSTEM_CODE);
