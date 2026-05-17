@@ -17,6 +17,7 @@ import {
 } from './team.js';
 import { parseTasks, exportToJira, exportToLinear } from './exporter.js';
 import { getRecentCommits, isGitRepo } from './git-committer.js';
+import { shareFeature, findFeatureDir, type ShareArtifact } from './share.js';
 
 const _dirname: string =
   typeof __dirname !== 'undefined'
@@ -828,6 +829,114 @@ program
   .command('doctor')
   .description('Vérifier la configuration et les fichiers installés')
   .action(runDoctor);
+
+// ─── sandykit share ────────────────────────────────────────────────────────────
+program
+  .command('share [feature]')
+  .description('Partager spec/plan/tâches via un GitHub Gist secret')
+  .option('--spec',  'Partager uniquement la spec')
+  .option('--plan',  'Partager uniquement le plan')
+  .option('--tasks', 'Partager uniquement les tâches')
+  .option('--all',   'Partager spec + plan + tâches (défaut)')
+  .option('--token <token>', 'GitHub token (ou env GITHUB_TOKEN)')
+  .action(async (feature: string | undefined, opts: { spec?: boolean; plan?: boolean; tasks?: boolean; all?: boolean; token?: string }) => {
+    showBanner();
+    p.intro(chalk.bold('Partager une feature'));
+
+    // Résoudre l'artifact à partager
+    const artifact: ShareArtifact =
+      opts.spec  ? 'spec'  :
+      opts.plan  ? 'plan'  :
+      opts.tasks ? 'tasks' : 'all';
+
+    // Résoudre le token GitHub
+    const token = opts.token ?? process.env.GITHUB_TOKEN;
+    if (!token) {
+      console.log(chalk.yellow('  💡 Sans GITHUB_TOKEN le gist sera créé anonymement (rate limit: 60 req/h)\n'));
+      console.log(chalk.dim('  Crée un token sur https://github.com/settings/tokens (scope: gist)\n'));
+    }
+
+    // Sélectionner la feature
+    const specsDir = join(process.cwd(), 'specs');
+    if (!existsSync(specsDir)) {
+      p.cancel('Aucun dossier specs/ trouvé. Lance sandykit dev d\'abord.');
+      return;
+    }
+
+    const features = readdirSync(specsDir).filter(d => {
+      return existsSync(join(specsDir, d, 'spec.md')) ||
+             existsSync(join(specsDir, d, 'plan.md')) ||
+             existsSync(join(specsDir, d, 'tasks.md'));
+    });
+
+    if (features.length === 0) {
+      p.cancel('Aucune feature avec des fichiers à partager.');
+      return;
+    }
+
+    let targetFeature = feature;
+    let featureDir: string | null = null;
+
+    if (targetFeature) {
+      featureDir = findFeatureDir(process.cwd(), targetFeature);
+      if (!featureDir) {
+        p.cancel(`Feature "${targetFeature}" introuvable dans specs/`);
+        return;
+      }
+    } else {
+      const choice = await p.select({
+        message: 'Quelle feature partager ?',
+        options: features.map(f => ({ value: f, label: f })),
+      });
+      if (p.isCancel(choice)) { p.cancel('Annulé'); return; }
+      targetFeature = choice as string;
+      featureDir = join(specsDir, targetFeature);
+    }
+
+    // Confirmer ce qu'on partage
+    const artifactLabel = artifact === 'all' ? 'spec + plan + tâches' : artifact;
+    const confirm = await p.confirm({
+      message: `Partager ${chalk.cyan(artifactLabel)} de "${targetFeature}" via GitHub Gist ?`,
+      initialValue: true,
+    });
+    if (p.isCancel(confirm) || !confirm) { p.cancel('Annulé'); return; }
+
+    const spinner = p.spinner();
+    spinner.start(`Création du gist GitHub (${artifact})...`);
+
+    try {
+      const result = await shareFeature({
+        artifact,
+        featureDir,
+        featureName: targetFeature,
+        token,
+      });
+
+      spinner.stop('Gist créé avec succès !');
+
+      console.log('');
+      console.log(chalk.bold('  🔗 Lien de partage :'));
+      console.log(chalk.cyan(`     ${result.url}`));
+      console.log('');
+
+      if (result.files.length > 1) {
+        console.log(chalk.dim('  Fichiers partagés :'));
+        result.files.forEach(f => console.log(chalk.dim(`    • ${f}`)));
+        console.log('');
+      }
+
+      console.log(chalk.dim('  Le gist est secret (seules les personnes avec le lien y ont accès)'));
+      if (!token) {
+        console.log(chalk.dim('  Tip: ajoute GITHUB_TOKEN pour créer des gists authentifiés et les modifier plus tard'));
+      }
+
+      p.outro(chalk.green('✓ Feature partagée'));
+    } catch (err: any) {
+      spinner.stop('Erreur');
+      console.log(chalk.red(`  ✗ ${err.message}`));
+      process.exit(1);
+    }
+  });
 
 // Only parse CLI args when run directly (not when imported by tests)
 if (process.argv[1] && (process.argv[1].endsWith('cli.ts') || process.argv[1].endsWith('cli.js') || process.argv[1].endsWith('cli.cjs'))) {
