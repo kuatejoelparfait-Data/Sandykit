@@ -11,6 +11,9 @@ import { saveVersioned, loadLatestVersion, listVersions, summarizeDiff } from '.
 import { storeApiKey, getApiKey } from './keystore.js';
 import { detectStack, stackToPromptContext } from './stack-detector.js';
 import { validateGeneratedProject, printValidationResult } from './validator.js';
+import { estimateCost, formatCostEstimate } from './cost-estimator.js';
+import { PROJECT_TEMPLATES, type ProjectTemplate } from './project-templates.js';
+import { generateTests, runLintAndFormat } from './test-generator.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -260,8 +263,10 @@ async function stepSpec(provider: ReturnType<typeof createProvider>, state: DevS
   while (true) {
     const spinner = p.spinner();
     spinner.start('Génération de la spec...');
-    const stackCtx = state.stack ? stackToPromptContext(state.stack) : '';
-    const prompt = `Voici la description du projet :\n\n${state.input}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}\n\nGénère une spécification fonctionnelle complète en markdown : scénarios utilisateur, exigences fonctionnelles, critères de succès, hors périmètre.`;
+    const stackCtx   = state.stack    ? stackToPromptContext(state.stack) : '';
+    const templateCtx = state.template?.specPromptBoost ? `\n\n## Directives du template ${state.template.label}\n${state.template.specPromptBoost}` : '';
+    const stackHint   = state.template?.stackHint ? `\n\nStack cible : ${state.template.stackHint}` : '';
+    const prompt = `Voici la description du projet :\n\n${state.input}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}${templateCtx}${stackHint}\n\nGénère une spécification fonctionnelle complète en markdown : scénarios utilisateur, exigences fonctionnelles, critères de succès, hors périmètre.`;
     spinner.stop('Spec générée :');
     spec = await streamToConsole(provider, prompt, SYSTEM_SPEC);
 
@@ -296,8 +301,10 @@ async function stepPlan(provider: ReturnType<typeof createProvider>, state: DevS
   while (true) {
     const spinner = p.spinner();
     spinner.start('Génération du plan...');
-    const stackCtx = state.stack ? stackToPromptContext(state.stack) : '';
-    const prompt = `Spec :\n${state.spec}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}\n\nGénère un plan technique : stack, architecture, structure des dossiers, composants, API/endpoints.`;
+    const stackCtx    = state.stack    ? stackToPromptContext(state.stack) : '';
+    const templateCtx = state.template?.planPromptBoost ? `\n\n## Directives d'architecture ${state.template.label}\n${state.template.planPromptBoost}` : '';
+    const stackHint   = state.template?.stackHint ? `\n\nStack : ${state.template.stackHint}` : '';
+    const prompt = `Spec :\n${state.spec}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}${templateCtx}${stackHint}\n\nGénère un plan technique : stack, architecture, structure des dossiers, composants, API/endpoints.`;
     spinner.stop('Plan généré :');
     plan = await streamToConsole(provider, prompt, SYSTEM_PLAN);
 
@@ -434,9 +441,13 @@ async function stepImplement(provider: ReturnType<typeof createProvider>, state:
 
 // ─── Machine à états ──────────────────────────────────────────────────────────
 
-export async function runDev(opts: { file?: string; resume?: boolean }): Promise<void> {
+export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: boolean }): Promise<void> {
   showBanner();
   p.intro(chalk.cyan('SANDYKIT Dev — Agent autonome spec → code'));
+
+  if (opts.dryRun) {
+    console.log(chalk.yellow('  Mode --dry-run : spec + plan générés, aucun fichier de code écrit\n'));
+  }
 
   // ── Détection du stack existant ──
   const stack = detectStack();
@@ -445,7 +456,15 @@ export async function runDev(opts: { file?: string; resume?: boolean }): Promise
   }
 
   // ── Checkpoint : propose de reprendre ──
-  const state: DevState & { stack?: typeof stack } = { stack };
+  // ── Choix du template de projet ──
+  const templateChoice = await p.select({
+    message: 'Type de projet :',
+    options: PROJECT_TEMPLATES.map(t => ({ value: t.id, label: t.label, hint: t.hint })),
+  });
+  if (p.isCancel(templateChoice)) { p.cancel('Annulé'); return; }
+  const template = PROJECT_TEMPLATES.find(t => t.id === templateChoice)!;
+
+  const state: DevState & { stack?: typeof stack; template?: ProjectTemplate } = { stack, template };
   let step = 0;
 
   const cp = loadCheckpoint();
@@ -572,17 +591,64 @@ export async function runDev(opts: { file?: string; resume?: boolean }): Promise
       }
 
       case 6: { // Implémentation
+        // ── Estimation de coût avant de lancer ──
+        if (state.input && state.providerCfg?.model) {
+          const est = estimateCost(state.providerCfg.model, state.providerCfg.type, state.input);
+          console.log(chalk.bold('\n  Estimation de coût :\n'));
+          console.log(formatCostEstimate(est));
+          console.log();
+        }
+
+        // ── Mode dry-run : s'arrête ici ──
+        if (opts.dryRun) {
+          console.log(chalk.yellow('  Mode --dry-run : arrêt avant l\'implémentation'));
+          console.log(chalk.dim(`  Specs sauvegardées dans : ${state.featureDir}`));
+          clearCheckpoint();
+          step++;
+          break;
+        }
+
         const provider = createProvider(state.providerCfg!);
         const res = await stepImplement(provider, state);
         if (res.action === 'back') { step--; break; }
         if (res.action === 'next') {
-          // Validation post-génération
-          const spinner = p.spinner();
-          spinner.start('Validation du projet généré...');
+          // ── Génération de tests ──
+          const genTests = await p.confirm({
+            message: 'Générer les tests automatiquement ?',
+            initialValue: true,
+          });
+          if (!p.isCancel(genTests) && genTests) {
+            const testSpinner = p.spinner();
+            testSpinner.start('Génération des tests...');
+            let testCode = '';
+            await generateTests(provider, state.spec!, state.tasks!, process.cwd(), (chunk) => { testCode += chunk; });
+            // Extraire et écrire les fichiers de test
+            const testBlocks = [...testCode.matchAll(/## Fichier:\s*(.+?)\n```(?:\w+)?\n([\s\S]+?)```/g)];
+            for (const [, filePath, content] of testBlocks) {
+              const fullPath = join(process.cwd(), filePath.trim());
+              mkdirSync(join(fullPath, '..'), { recursive: true });
+              writeFileSync(fullPath, content, 'utf-8');
+            }
+            testSpinner.stop(`${testBlocks.length} fichier(s) de test générés`);
+          }
+
+          // ── Lint + Format ──
+          const lintSpinner = p.spinner();
+          lintSpinner.start('Lint + formatage du code...');
+          const lintResults = await runLintAndFormat(process.cwd());
+          lintSpinner.stop('Lint terminé');
+          for (const r of lintResults) {
+            const icon = r.passed ? chalk.green('  ✓') : chalk.yellow('  ⚠');
+            console.log(`${icon}  ${r.tool}${r.errors > 0 ? chalk.red(` — ${r.errors} erreur(s)`) : ''}`);
+          }
+
+          // ── Validation post-génération ──
+          const validSpinner = p.spinner();
+          validSpinner.start('Validation du projet...');
           const validation = await validateGeneratedProject(process.cwd());
-          spinner.stop('Validation terminée');
+          validSpinner.stop('Validation terminée');
           printValidationResult(validation);
-          // Checkpoint terminé → on le supprime
+
           clearCheckpoint();
           step++;
         }

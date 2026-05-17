@@ -608,7 +608,8 @@ program
   .description('Agent autonome : spec → plan → tâches → code (v3)')
   .option('--file <chemin>', 'Chemin vers un cahier des charges (.txt, .md, .pdf, .docx)')
   .option('--resume', 'Reprendre depuis le dernier checkpoint sauvegardé')
-  .action((opts) => runDev(opts));
+  .option('--dry-run', 'Générer spec + plan uniquement, sans écrire de code')
+  .action((opts) => runDev({ ...opts, dryRun: opts.dryRun }));
 
 program
   .command('open [nom]')
