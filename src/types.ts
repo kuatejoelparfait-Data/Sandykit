@@ -4,6 +4,7 @@ export interface SandykitConfig {
   projectName: string;
   integrations: Integration[];
   createdAt: string;
+  provider?: import('./providers.js').ProviderConfig;
 }
 
 export interface FeatureStatus {

@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync, existsSync, readdirSync, rmSync, copyFileSync
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
+import { runDev } from './dev.js';
 
 const _dirname: string =
   typeof __dirname !== 'undefined'
@@ -601,6 +602,12 @@ program
   .command('export [nom]')
   .description('Exporter les fichiers d\'une feature dans exports/')
   .action(runExport);
+
+program
+  .command('dev')
+  .description('Agent autonome : spec → plan → tâches → code (v3)')
+  .option('--file <chemin>', 'Chemin vers un cahier des charges (.txt, .md, .pdf, .docx)')
+  .action((opts) => runDev(opts));
 
 program
   .command('open [nom]')

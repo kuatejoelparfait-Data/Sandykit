@@ -11,6 +11,7 @@ export function saveConfig(cfg: Partial<SandykitConfig>, rootDir = process.cwd()
     projectName: cfg.projectName ?? 'mon-projet',
     integrations: cfg.integrations ?? ['claude'],
     createdAt: new Date().toISOString(),
+    ...(cfg.provider ? { provider: cfg.provider } : {}),
   };
   writeFileSync(join(rootDir, CONFIG_FILE), JSON.stringify(full, null, 2), 'utf-8');
 }
