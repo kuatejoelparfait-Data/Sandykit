@@ -6,6 +6,11 @@ import { showBanner } from './banner.js';
 import { createProvider, PROVIDER_MODELS, type ProviderConfig, type ProviderType } from './providers.js';
 import { readCahierDesCharges } from './reader.js';
 import { saveConfig, loadConfig } from './config.js';
+import { saveCheckpoint, loadCheckpoint, clearCheckpoint, describeCheckpoint, type CheckpointState } from './checkpoint.js';
+import { saveVersioned, loadLatestVersion, listVersions, summarizeDiff } from './versioning.js';
+import { storeApiKey, getApiKey } from './keystore.js';
+import { detectStack, stackToPromptContext } from './stack-detector.js';
+import { validateGeneratedProject, printValidationResult } from './validator.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -255,7 +260,8 @@ async function stepSpec(provider: ReturnType<typeof createProvider>, state: DevS
   while (true) {
     const spinner = p.spinner();
     spinner.start('Génération de la spec...');
-    const prompt = `Voici la description du projet :\n\n${state.input}${additions ? `\n\nPrécisions :\n${additions}` : ''}\n\nGénère une spécification fonctionnelle complète en markdown : scénarios utilisateur, exigences fonctionnelles, critères de succès, hors périmètre.`;
+    const stackCtx = state.stack ? stackToPromptContext(state.stack) : '';
+    const prompt = `Voici la description du projet :\n\n${state.input}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}\n\nGénère une spécification fonctionnelle complète en markdown : scénarios utilisateur, exigences fonctionnelles, critères de succès, hors périmètre.`;
     spinner.stop('Spec générée :');
     spec = await streamToConsole(provider, prompt, SYSTEM_SPEC);
 
@@ -290,7 +296,8 @@ async function stepPlan(provider: ReturnType<typeof createProvider>, state: DevS
   while (true) {
     const spinner = p.spinner();
     spinner.start('Génération du plan...');
-    const prompt = `Spec :\n${state.spec}${additions ? `\n\nPrécisions :\n${additions}` : ''}\n\nGénère un plan technique : stack, architecture, structure des dossiers, composants, API/endpoints.`;
+    const stackCtx = state.stack ? stackToPromptContext(state.stack) : '';
+    const prompt = `Spec :\n${state.spec}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}\n\nGénère un plan technique : stack, architecture, structure des dossiers, composants, API/endpoints.`;
     spinner.stop('Plan généré :');
     plan = await streamToConsole(provider, prompt, SYSTEM_PLAN);
 
@@ -427,12 +434,46 @@ async function stepImplement(provider: ReturnType<typeof createProvider>, state:
 
 // ─── Machine à états ──────────────────────────────────────────────────────────
 
-export async function runDev(opts: { file?: string }): Promise<void> {
+export async function runDev(opts: { file?: string; resume?: boolean }): Promise<void> {
   showBanner();
   p.intro(chalk.cyan('SANDYKIT Dev — Agent autonome spec → code'));
 
-  const state: DevState = {};
+  // ── Détection du stack existant ──
+  const stack = detectStack();
+  if (stack.language.length || stack.framework.length) {
+    console.log(chalk.dim(`  Stack détecté : ${stack.summary}\n`));
+  }
+
+  // ── Checkpoint : propose de reprendre ──
+  const state: DevState & { stack?: typeof stack } = { stack };
   let step = 0;
+
+  const cp = loadCheckpoint();
+  if (cp && !opts.resume) {
+    const resume = await p.select({
+      message: `Session précédente trouvée : ${describeCheckpoint(cp)}`,
+      options: [
+        { value: 'resume', label: '▶  Reprendre depuis là où j\'ai arrêté' },
+        { value: 'new',    label: '✦  Nouveau projet (ignorer le checkpoint)' },
+      ],
+    });
+    if (!p.isCancel(resume) && resume === 'resume') {
+      state.providerCfg = cp.providerCfg;
+      state.projectName = cp.projectName;
+      state.featureDir  = cp.featureDir;
+      state.input       = cp.input;
+      state.spec        = cp.spec;
+      state.plan        = cp.plan;
+      state.tasks       = cp.tasks;
+      step = cp.step;
+      // Récupérer la clé API depuis le keystore (non stockée dans le checkpoint)
+      if (state.providerCfg && !state.providerCfg.apiKey) {
+        const key = await getApiKey(state.providerCfg.type);
+        if (key) state.providerCfg = { ...state.providerCfg, apiKey: key };
+      }
+      console.log(chalk.green(`  ✓ Reprise à l'étape ${step}\n`));
+    }
+  }
 
   while (step <= 6) {
     switch (step) {
@@ -441,8 +482,11 @@ export async function runDev(opts: { file?: string }): Promise<void> {
         if (res.action === 'cancel') return;
         if (res.action === 'next') {
           state.providerCfg = res.data;
+          // Stocker la clé API dans le keychain OS
+          if (res.data.apiKey) await storeApiKey(res.data.type, res.data.apiKey);
           const existingCfg = loadConfig();
-          saveConfig({ ...(existingCfg ?? {}), provider: res.data });
+          // Ne pas sauvegarder la clé en clair dans config.json
+          saveConfig({ ...(existingCfg ?? {}), provider: { ...res.data, apiKey: undefined } });
           step++;
         }
         break;
@@ -451,12 +495,15 @@ export async function runDev(opts: { file?: string }): Promise<void> {
       case 1: { // Nom du projet
         const res = await stepProjectName(state);
         if (res.action === 'back') { step--; break; }
-        if (res.action === 'next') { state.projectName = res.data; step++; }
+        if (res.action === 'next') {
+          state.projectName = res.data;
+          saveCheckpoint({ version: 1, projectName: res.data, featureDir: state.featureDir ?? '', providerCfg: state.providerCfg!, step: 1, savedAt: new Date().toISOString() });
+          step++;
+        }
         break;
       }
 
-      case 2: { // Input
-        // Crée le dossier feature dès qu'on a le nom
+      case 2: { // Input + création du dossier feature
         if (!state.featureDir) {
           const specsDir = join(process.cwd(), 'specs');
           const existing = existsSync(specsDir) ? readdirSync(specsDir).filter(d => /^\d{3}-/.test(d)) : [];
@@ -468,7 +515,11 @@ export async function runDev(opts: { file?: string }): Promise<void> {
         }
         const res = await stepInput(state, opts.file);
         if (res.action === 'back') { step--; break; }
-        if (res.action === 'next') { state.input = res.data; step++; }
+        if (res.action === 'next') {
+          state.input = res.data;
+          saveCheckpoint({ version: 1, projectName: state.projectName!, featureDir: state.featureDir, providerCfg: state.providerCfg!, input: state.input, step: 2, savedAt: new Date().toISOString() });
+          step++;
+        }
         break;
       }
 
@@ -477,9 +528,12 @@ export async function runDev(opts: { file?: string }): Promise<void> {
         const res = await stepSpec(provider, state);
         if (res.action === 'back') { step--; break; }
         if (res.action === 'next') {
+          const prev = loadLatestVersion(state.featureDir!, 'spec');
+          const version = saveVersioned(state.featureDir!, 'spec', res.data, 'Généré par IA');
+          if (prev) console.log(chalk.dim(`  spec.md v${version} — ${summarizeDiff(prev, res.data)}`));
+          else console.log(chalk.green(`  ✓ spec.md v${version} sauvegardé`));
           state.spec = res.data;
-          writeFileSync(join(state.featureDir!, 'spec.md'), state.spec, 'utf-8');
-          console.log(chalk.green('  ✓ spec.md sauvegardé'));
+          saveCheckpoint({ version: 1, projectName: state.projectName!, featureDir: state.featureDir!, providerCfg: state.providerCfg!, input: state.input, spec: state.spec, step: 3, savedAt: new Date().toISOString() });
           step++;
         }
         break;
@@ -490,9 +544,12 @@ export async function runDev(opts: { file?: string }): Promise<void> {
         const res = await stepPlan(provider, state);
         if (res.action === 'back') { step--; break; }
         if (res.action === 'next') {
+          const prev = loadLatestVersion(state.featureDir!, 'plan');
+          const version = saveVersioned(state.featureDir!, 'plan', res.data, 'Généré par IA');
+          if (prev) console.log(chalk.dim(`  plan.md v${version} — ${summarizeDiff(prev, res.data)}`));
+          else console.log(chalk.green(`  ✓ plan.md v${version} sauvegardé`));
           state.plan = res.data;
-          writeFileSync(join(state.featureDir!, 'plan.md'), state.plan, 'utf-8');
-          console.log(chalk.green('  ✓ plan.md sauvegardé'));
+          saveCheckpoint({ version: 1, projectName: state.projectName!, featureDir: state.featureDir!, providerCfg: state.providerCfg!, input: state.input, spec: state.spec, plan: state.plan, step: 4, savedAt: new Date().toISOString() });
           step++;
         }
         break;
@@ -503,9 +560,12 @@ export async function runDev(opts: { file?: string }): Promise<void> {
         const res = await stepTasks(provider, state);
         if (res.action === 'back') { step--; break; }
         if (res.action === 'next') {
+          const prev = loadLatestVersion(state.featureDir!, 'tasks');
+          const version = saveVersioned(state.featureDir!, 'tasks', res.data, 'Généré par IA');
+          if (prev) console.log(chalk.dim(`  tasks.md v${version} — ${summarizeDiff(prev, res.data)}`));
+          else console.log(chalk.green(`  ✓ tasks.md v${version} sauvegardé`));
           state.tasks = res.data;
-          writeFileSync(join(state.featureDir!, 'tasks.md'), state.tasks, 'utf-8');
-          console.log(chalk.green('  ✓ tasks.md sauvegardé'));
+          saveCheckpoint({ version: 1, projectName: state.projectName!, featureDir: state.featureDir!, providerCfg: state.providerCfg!, input: state.input, spec: state.spec, plan: state.plan, tasks: state.tasks, step: 5, savedAt: new Date().toISOString() });
           step++;
         }
         break;
@@ -515,7 +575,17 @@ export async function runDev(opts: { file?: string }): Promise<void> {
         const provider = createProvider(state.providerCfg!);
         const res = await stepImplement(provider, state);
         if (res.action === 'back') { step--; break; }
-        if (res.action === 'next') { step++; }
+        if (res.action === 'next') {
+          // Validation post-génération
+          const spinner = p.spinner();
+          spinner.start('Validation du projet généré...');
+          const validation = await validateGeneratedProject(process.cwd());
+          spinner.stop('Validation terminée');
+          printValidationResult(validation);
+          // Checkpoint terminé → on le supprime
+          clearCheckpoint();
+          step++;
+        }
         break;
       }
     }

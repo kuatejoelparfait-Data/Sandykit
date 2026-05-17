@@ -607,6 +607,7 @@ program
   .command('dev')
   .description('Agent autonome : spec → plan → tâches → code (v3)')
   .option('--file <chemin>', 'Chemin vers un cahier des charges (.txt, .md, .pdf, .docx)')
+  .option('--resume', 'Reprendre depuis le dernier checkpoint sauvegardé')
   .action((opts) => runDev(opts));
 
 program
