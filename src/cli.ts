@@ -11,6 +11,12 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { runDev } from './dev.js';
+import {
+  loadTeamConfig, saveTeamConfig, createTeamConfig, addMember, removeMember,
+  hasTeamConfig, formatTeamConfig
+} from './team.js';
+import { parseTasks, exportToJira, exportToLinear } from './exporter.js';
+import { getRecentCommits, isGitRepo } from './git-committer.js';
 
 const _dirname: string =
   typeof __dirname !== 'undefined'
@@ -602,6 +608,198 @@ program
   .command('export [nom]')
   .description('Exporter les fichiers d\'une feature dans exports/')
   .action(runExport);
+
+// ─── sandykit team ─────────────────────────────────────────────────────────────
+const teamCmd = program.command('team').description('Gérer la configuration équipe du projet');
+
+teamCmd
+  .command('init')
+  .description('Initialiser la config équipe (sandykit.team.json)')
+  .action(async () => {
+    showBanner();
+    p.intro(chalk.bold('Configuration équipe'));
+
+    if (hasTeamConfig(process.cwd())) {
+      const overwrite = await p.confirm({
+        message: 'sandykit.team.json existe déjà. Écraser ?',
+        initialValue: false,
+      });
+      if (p.isCancel(overwrite) || !overwrite) { p.cancel('Annulé'); return; }
+    }
+
+    const projectName = await p.text({ message: 'Nom du projet :', validate: v => (!v ? 'Requis' : undefined) });
+    if (p.isCancel(projectName)) { p.cancel('Annulé'); return; }
+
+    const ownerName = await p.text({ message: 'Votre nom (owner) :', placeholder: 'John Doe' });
+    if (p.isCancel(ownerName)) { p.cancel('Annulé'); return; }
+
+    const ownerEmail = await p.text({ message: 'Votre email :', placeholder: 'john@example.com' });
+    if (p.isCancel(ownerEmail)) { p.cancel('Annulé'); return; }
+
+    const autoCommitChoice = await p.confirm({ message: 'Activer les git auto-commits ?', initialValue: true });
+
+    const webhook = await p.text({ message: 'Webhook URL (optionnel — laisser vide pour ignorer) :', placeholder: 'https://hooks.slack.com/...' });
+
+    const cfg = loadConfig();
+    const teamConfig = createTeamConfig(process.cwd(), {
+      projectName: projectName as string,
+      provider: (cfg?.provider?.type as any) ?? 'claude',
+      model: cfg?.provider?.model ?? 'claude-sonnet-4-6',
+      ownerName: ownerName as string,
+      ownerEmail: ownerEmail as string,
+      autoCommit: !p.isCancel(autoCommitChoice) ? autoCommitChoice as boolean : true,
+    });
+
+    if (!p.isCancel(webhook) && (webhook as string).startsWith('http')) {
+      teamConfig.hooks.webhook = webhook as string;
+      saveTeamConfig(process.cwd(), teamConfig);
+    }
+
+    p.outro(chalk.green(`✓ sandykit.team.json créé pour "${projectName}"`));
+    console.log(chalk.dim('\n  Partage ce fichier dans ton repo (sans les clés API !) :\n'));
+    console.log(chalk.cyan('  git add sandykit.team.json && git commit -m "chore: add sandykit team config"'));
+  });
+
+teamCmd
+  .command('show')
+  .description('Afficher la config équipe actuelle')
+  .action(() => {
+    const teamCfg = loadTeamConfig(process.cwd());
+    if (!teamCfg) {
+      console.log(chalk.yellow('Aucune config équipe. Lance : sandykit team init'));
+      return;
+    }
+    console.log(chalk.bold('\n  Config équipe :\n'));
+    console.log(formatTeamConfig(teamCfg));
+    console.log();
+
+    if (isGitRepo(process.cwd())) {
+      const commits = getRecentCommits(process.cwd(), 5);
+      if (commits.length > 0) {
+        console.log(chalk.bold('  Derniers commits :'));
+        commits.forEach(c => console.log(chalk.dim(`    ${c}`)));
+        console.log();
+      }
+    }
+  });
+
+teamCmd
+  .command('add <email> [nom] [role]')
+  .description('Ajouter un membre à l\'équipe')
+  .action((email: string, nom: string, role: string) => {
+    const updated = addMember(process.cwd(), {
+      email,
+      name: nom ?? email.split('@')[0],
+      role: (['owner', 'contributor', 'reviewer'].includes(role) ? role : 'contributor') as any,
+    });
+    if (!updated) { console.log(chalk.yellow('Aucune config équipe. Lance : sandykit team init')); return; }
+    console.log(chalk.green(`✓ ${email} ajouté comme ${role ?? 'contributor'}`));
+  });
+
+teamCmd
+  .command('remove <email>')
+  .description('Retirer un membre de l\'équipe')
+  .action((email: string) => {
+    const updated = removeMember(process.cwd(), email);
+    if (!updated) { console.log(chalk.yellow('Aucune config équipe.')); return; }
+    console.log(chalk.green(`✓ ${email} retiré`));
+  });
+
+// ─── sandykit tickets ──────────────────────────────────────────────────────────
+program
+  .command('tickets [feature]')
+  .description('Exporter les tâches vers Jira ou Linear')
+  .option('--jira', 'Exporter vers Jira (nécessite JIRA_API_TOKEN)')
+  .option('--linear', 'Exporter vers Linear (nécessite LINEAR_API_TOKEN)')
+  .action(async (feature: string | undefined, opts: { jira?: boolean; linear?: boolean }) => {
+    showBanner();
+    p.intro(chalk.bold('Export vers ticketing'));
+
+    const teamCfg = loadTeamConfig(process.cwd());
+
+    // Trouver le fichier tasks.md
+    const specsDir = join(process.cwd(), 'specs');
+    if (!existsSync(specsDir)) {
+      p.cancel('Aucun dossier specs/ trouvé. Lance sandykit dev d\'abord.');
+      return;
+    }
+
+    const features = readdirSync(specsDir).filter(d => existsSync(join(specsDir, d, 'tasks.md')));
+    if (features.length === 0) {
+      p.cancel('Aucune feature avec tasks.md trouvée.');
+      return;
+    }
+
+    let targetFeature = feature;
+    if (!targetFeature) {
+      const choice = await p.select({
+        message: 'Quelle feature exporter ?',
+        options: features.map(f => ({ value: f, label: f })),
+      });
+      if (p.isCancel(choice)) { p.cancel('Annulé'); return; }
+      targetFeature = choice as string;
+    }
+
+    const tasksPath = join(specsDir, targetFeature, 'tasks.md');
+    if (!existsSync(tasksPath)) {
+      p.cancel(`tasks.md introuvable dans specs/${targetFeature}/`);
+      return;
+    }
+
+    const tasksContent = readFileSync(tasksPath, 'utf-8');
+    const tasks = parseTasks(tasksContent);
+
+    if (tasks.length === 0) {
+      p.cancel('Aucune tâche parsée depuis tasks.md');
+      return;
+    }
+
+    console.log(chalk.bold(`\n  ${tasks.length} tâche(s) trouvée(s)\n`));
+    tasks.forEach((t, i) => console.log(chalk.dim(`  ${i + 1}. ${t.title} [${t.priority}]`)));
+    console.log();
+
+    const platform = opts.jira ? 'jira' : opts.linear ? 'linear' : null;
+    if (!platform) {
+      const choice = await p.select({
+        message: 'Vers quelle plateforme ?',
+        options: [
+          { value: 'jira',   label: 'Jira (JIRA_API_TOKEN)' },
+          { value: 'linear', label: 'Linear (LINEAR_API_TOKEN)' },
+        ],
+      });
+      if (p.isCancel(choice)) { p.cancel('Annulé'); return; }
+    }
+
+    const finalPlatform = platform ?? 'linear';
+    const spinner = p.spinner();
+
+    try {
+      if (finalPlatform === 'jira') {
+        if (!teamCfg?.export?.jira) {
+          p.cancel('Configure export.jira dans sandykit.team.json (baseUrl + project)');
+          return;
+        }
+        spinner.start('Export vers Jira...');
+        const result = await exportToJira(tasks, teamCfg.export.jira);
+        spinner.stop(`${result.created} ticket(s) créés, ${result.failed} échec(s)`);
+        result.links.forEach(l => console.log(chalk.cyan(`  → ${l}`)));
+      } else {
+        if (!teamCfg?.export?.linear) {
+          p.cancel('Configure export.linear dans sandykit.team.json (teamId)');
+          return;
+        }
+        spinner.start('Export vers Linear...');
+        const result = await exportToLinear(tasks, teamCfg.export.linear);
+        spinner.stop(`${result.created} issue(s) créées, ${result.failed} échec(s)`);
+        result.links.forEach(l => console.log(chalk.cyan(`  → ${l}`)));
+      }
+    } catch (err: any) {
+      spinner.stop('Erreur');
+      console.log(chalk.red(`  ✗ ${err.message}`));
+    }
+
+    p.outro(chalk.green('✓ Export terminé'));
+  });
 
 program
   .command('dev')

@@ -14,6 +14,8 @@ import { validateGeneratedProject, printValidationResult } from './validator.js'
 import { estimateCost, formatCostEstimate } from './cost-estimator.js';
 import { PROJECT_TEMPLATES, type ProjectTemplate } from './project-templates.js';
 import { generateTests, runLintAndFormat } from './test-generator.js';
+import { autoCommit, initGitRepo, type CommitStep } from './git-committer.js';
+import { loadTeamConfig, hasTeamConfig, runWebhook } from './team.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +29,8 @@ interface DevState {
   plan?: string;
   tasks?: string;
   featureDir?: string;
+  autoGit?: boolean;
+  webhookUrl?: string;
 }
 
 // ─── System prompts ───────────────────────────────────────────────────────────
@@ -464,7 +468,14 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
   if (p.isCancel(templateChoice)) { p.cancel('Annulé'); return; }
   const template = PROJECT_TEMPLATES.find(t => t.id === templateChoice)!;
 
-  const state: DevState & { stack?: typeof stack; template?: ProjectTemplate } = { stack, template };
+  // ── Team config : defaults partagés ──
+  const teamCfg = loadTeamConfig(process.cwd());
+  const state: DevState & { stack?: typeof stack; template?: ProjectTemplate } = {
+    stack,
+    template,
+    autoGit: teamCfg?.autoCommit ?? true,
+    webhookUrl: teamCfg?.hooks?.webhook,
+  };
   let step = 0;
 
   const cp = loadCheckpoint();
@@ -553,6 +564,11 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
           else console.log(chalk.green(`  ✓ spec.md v${version} sauvegardé`));
           state.spec = res.data;
           saveCheckpoint({ version: 1, projectName: state.projectName!, featureDir: state.featureDir!, providerCfg: state.providerCfg!, input: state.input, spec: state.spec, step: 3, savedAt: new Date().toISOString() });
+          if (state.autoGit) {
+            const commit = await autoCommit(process.cwd(), 'spec', state.projectName!);
+            if (commit.success && !commit.skipped) console.log(chalk.dim(`  git: ${commit.sha} — ${commit.message}`));
+          }
+          if (state.webhookUrl) runWebhook(state.webhookUrl, { step: 'spec', projectName: state.projectName!, timestamp: new Date().toISOString() });
           step++;
         }
         break;
@@ -569,6 +585,11 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
           else console.log(chalk.green(`  ✓ plan.md v${version} sauvegardé`));
           state.plan = res.data;
           saveCheckpoint({ version: 1, projectName: state.projectName!, featureDir: state.featureDir!, providerCfg: state.providerCfg!, input: state.input, spec: state.spec, plan: state.plan, step: 4, savedAt: new Date().toISOString() });
+          if (state.autoGit) {
+            const commit = await autoCommit(process.cwd(), 'plan', state.projectName!);
+            if (commit.success && !commit.skipped) console.log(chalk.dim(`  git: ${commit.sha} — ${commit.message}`));
+          }
+          if (state.webhookUrl) runWebhook(state.webhookUrl, { step: 'plan', projectName: state.projectName!, timestamp: new Date().toISOString() });
           step++;
         }
         break;
@@ -585,6 +606,11 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
           else console.log(chalk.green(`  ✓ tasks.md v${version} sauvegardé`));
           state.tasks = res.data;
           saveCheckpoint({ version: 1, projectName: state.projectName!, featureDir: state.featureDir!, providerCfg: state.providerCfg!, input: state.input, spec: state.spec, plan: state.plan, tasks: state.tasks, step: 5, savedAt: new Date().toISOString() });
+          if (state.autoGit) {
+            const commit = await autoCommit(process.cwd(), 'tasks', state.projectName!);
+            if (commit.success && !commit.skipped) console.log(chalk.dim(`  git: ${commit.sha} — ${commit.message}`));
+          }
+          if (state.webhookUrl) runWebhook(state.webhookUrl, { step: 'tasks', projectName: state.projectName!, timestamp: new Date().toISOString() });
           step++;
         }
         break;
@@ -648,6 +674,15 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
           const validation = await validateGeneratedProject(process.cwd());
           validSpinner.stop('Validation terminée');
           printValidationResult(validation);
+
+          // ── Auto-commit implementation ──
+          if (state.autoGit) {
+            const commitImpl = await autoCommit(process.cwd(), 'implement', state.projectName!);
+            if (commitImpl.success && !commitImpl.skipped) console.log(chalk.dim(`  git: ${commitImpl.sha} — ${commitImpl.message}`));
+            const commitTests = await autoCommit(process.cwd(), 'tests', state.projectName!);
+            if (commitTests.success && !commitTests.skipped) console.log(chalk.dim(`  git: ${commitTests.sha} — ${commitTests.message}`));
+          }
+          if (state.webhookUrl) runWebhook(state.webhookUrl, { step: 'implement', projectName: state.projectName!, timestamp: new Date().toISOString() });
 
           clearCheckpoint();
           step++;
