@@ -10,7 +10,7 @@ await build({
   outfile: 'dist/cli.cjs',
   external: ['@anthropic-ai/sdk', 'openai', '@clack/prompts', 'conf', 'chokidar', 'pdf-parse', 'mammoth'],
   banner: {
-    js: '#!/usr/bin/env node',
+    js: '#!/usr/bin/env node --no-deprecation',
   },
 });
 
