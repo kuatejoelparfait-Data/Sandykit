@@ -6,6 +6,7 @@ await build({
   bundle: true,
   platform: 'node',
   target: 'node18',
+  // keytar est un module natif optionnel — si absent ou cassé, le fallback fichier prend le relais
   format: 'cjs',
   outfile: 'dist/cli.cjs',
   external: ['@anthropic-ai/sdk', 'openai', '@clack/prompts', 'conf', 'chokidar', 'pdf-parse', 'mammoth', 'keytar'],

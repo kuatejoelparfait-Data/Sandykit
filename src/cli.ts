@@ -15,6 +15,7 @@ import {
   loadTeamConfig, saveTeamConfig, createTeamConfig, addMember, removeMember,
   hasTeamConfig, formatTeamConfig
 } from './team.js';
+import { keystoreBackend } from './keystore.js';
 import { parseTasks, exportToJira, exportToLinear } from './exporter.js';
 import { getRecentCommits, isGitRepo } from './git-committer.js';
 import { shareFeature, findFeatureDir, type ShareArtifact } from './share.js';
@@ -474,7 +475,7 @@ async function runArchive(nom: string | undefined): Promise<void> {
   p.outro(chalk.green(`✓ "${target}" déplacé dans archives/`));
 }
 
-function runDoctor(): void {
+async function runDoctor(): Promise<void> {
   showBanner();
   console.log(chalk.bold('Diagnostic SANDYKIT\n'));
 
@@ -525,6 +526,21 @@ function runDoctor(): void {
     const hint = detail ? chalk.dim(`  ${detail}`) : '';
     console.log(`  ${icon}  ${text}${hint}`);
   }
+
+  // Vérifier le backend de stockage des clés API
+  const backend = await keystoreBackend();
+  const backendLabels: Record<string, string> = {
+    keychain: 'OS Keychain (sécurisé)',
+    file:     'Fichier local .sandykit/keys (keytar indisponible sur Node ' + process.versions.node + ')',
+    env:      'Variable d\'environnement',
+  };
+  checks.push({
+    label: `Stockage clés API : ${backendLabels[backend]}`,
+    ok: backend !== 'file',
+    detail: backend === 'file'
+      ? 'Installe keytar@7 avec Node 18/20 pour le keychain OS, ou utilise une variable d\'environnement'
+      : undefined,
+  });
 
   const allOk = checks.every(c => c.ok);
   console.log();
@@ -828,7 +844,7 @@ program
 program
   .command('doctor')
   .description('Vérifier la configuration et les fichiers installés')
-  .action(runDoctor);
+  .action(() => runDoctor());
 
 // ─── sandykit share ────────────────────────────────────────────────────────────
 program
