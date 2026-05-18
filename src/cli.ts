@@ -16,6 +16,8 @@ import {
   hasTeamConfig, formatTeamConfig
 } from './team.js';
 import { keystoreBackend } from './keystore.js';
+import { runIncremental } from './incremental.js';
+import { getBudgetStatus, loadBudgetConfig, saveBudgetConfig, formatBudgetReport } from './budget.js';
 import { parseTasks, exportToJira, exportToLinear } from './exporter.js';
 import { getRecentCommits, isGitRepo } from './git-committer.js';
 import { shareFeature, findFeatureDir, type ShareArtifact } from './share.js';
@@ -824,7 +826,65 @@ program
   .option('--file <chemin>', 'Chemin vers un cahier des charges (.txt, .md, .pdf, .docx)')
   .option('--resume', 'Reprendre depuis le dernier checkpoint sauvegardé')
   .option('--dry-run', 'Générer spec + plan uniquement, sans écrire de code')
-  .action((opts) => runDev({ ...opts, dryRun: opts.dryRun }));
+  .option('--pr', 'Créer une Pull Request automatiquement après génération')
+  .action((opts) => runDev({ ...opts, dryRun: opts.dryRun, pr: opts.pr }));
+
+program
+  .command('add [description]')
+  .description('Ajouter une feature à un projet existant (génération incrémentale + RAG)')
+  .option('--file <chemin>', 'Cahier des charges pour la feature')
+  .option('--dry-run', 'Générer spec + plan uniquement')
+  .option('--pr', 'Créer une Pull Request après génération')
+  .option('--no-git', 'Désactiver les auto-commits')
+  .action((description: string | undefined, opts) =>
+    runIncremental({ description, file: opts.file, dryRun: opts.dryRun, pr: opts.pr, autoGit: opts.git !== false })
+  );
+
+// ─── sandykit budget ────────────────────────────────────────────────────────────
+const budgetCmd = program.command('budget').description('Gérer le budget mensuel de dépenses IA');
+
+budgetCmd
+  .command('show')
+  .description('Afficher les dépenses IA du mois courant')
+  .action(() => {
+    showBanner();
+    console.log(chalk.bold('\n  Budget IA — Dépenses du mois\n'));
+    console.log(formatBudgetReport(process.cwd()));
+    console.log();
+  });
+
+budgetCmd
+  .command('set <montant>')
+  .description('Définir un budget mensuel maximum en USD')
+  .option('--alert <pourcent>', 'Alerte à X% du budget (défaut: 80)', '80')
+  .option('--webhook <url>', 'URL webhook pour alertes')
+  .action((montant: string, opts) => {
+    const limit = parseFloat(montant);
+    if (isNaN(limit) || limit <= 0) {
+      console.log(chalk.red('  ✗ Montant invalide. Exemple : sandykit budget set 20'));
+      return;
+    }
+    const existing = loadBudgetConfig(process.cwd()) ?? {} as any;
+    saveBudgetConfig(process.cwd(), {
+      ...existing,
+      monthlyLimitUSD: limit,
+      alertAtPercent: parseInt(opts.alert, 10) || 80,
+      webhookUrl: opts.webhook ?? existing.webhookUrl,
+    });
+    console.log(chalk.green(`  ✓ Budget mensuel fixé à $${limit.toFixed(2)}`));
+    console.log(chalk.dim(`  Alerte à ${opts.alert}% du budget`));
+    if (opts.webhook) console.log(chalk.dim(`  Webhook : ${opts.webhook}`));
+  });
+
+budgetCmd
+  .command('reset')
+  .description('Supprimer le budget mensuel configuré')
+  .action(() => {
+    const existing = loadBudgetConfig(process.cwd());
+    if (!existing) { console.log(chalk.yellow('  Aucun budget configuré.')); return; }
+    saveBudgetConfig(process.cwd(), { ...existing, monthlyLimitUSD: Infinity });
+    console.log(chalk.green('  ✓ Limite de budget supprimée'));
+  });
 
 program
   .command('open [nom]')

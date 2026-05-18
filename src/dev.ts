@@ -16,6 +16,10 @@ import { PROJECT_TEMPLATES, type ProjectTemplate } from './project-templates.js'
 import { generateTests, runLintAndFormat } from './test-generator.js';
 import { autoCommit, initGitRepo, type CommitStep } from './git-committer.js';
 import { loadTeamConfig, hasTeamConfig, runWebhook } from './team.js';
+import { buildRAGContext, formatRAGContextForPrompt } from './rag.js';
+import { parseGeneratedFiles, interactiveDiffWrite } from './diff-writer.js';
+import { checkBudget, recordUsage, sendBudgetAlert } from './budget.js';
+import { createPullRequest, ghAvailable } from './pr-creator.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -267,10 +271,11 @@ async function stepSpec(provider: ReturnType<typeof createProvider>, state: DevS
   while (true) {
     const spinner = p.spinner();
     spinner.start('Génération de la spec...');
-    const stackCtx   = state.stack    ? stackToPromptContext(state.stack) : '';
+    const stackCtx    = state.stack    ? stackToPromptContext(state.stack) : '';
     const templateCtx = state.template?.specPromptBoost ? `\n\n## Directives du template ${state.template.label}\n${state.template.specPromptBoost}` : '';
     const stackHint   = state.template?.stackHint ? `\n\nStack cible : ${state.template.stackHint}` : '';
-    const prompt = `Voici la description du projet :\n\n${state.input}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}${templateCtx}${stackHint}\n\nGénère une spécification fonctionnelle complète en markdown : scénarios utilisateur, exigences fonctionnelles, critères de succès, hors périmètre.`;
+    const ragSection  = (state as any).ragContext ? formatRAGContextForPrompt((state as any).ragContext) : '';
+    const prompt = `Voici la description du projet :\n\n${state.input}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}${templateCtx}${stackHint}${ragSection ? `\n\n${ragSection}` : ''}\n\nGénère une spécification fonctionnelle complète en markdown : scénarios utilisateur, exigences fonctionnelles, critères de succès, hors périmètre.`;
     spinner.stop('Spec générée :');
     spec = await streamToConsole(provider, prompt, SYSTEM_SPEC);
 
@@ -422,22 +427,17 @@ async function stepImplement(provider: ReturnType<typeof createProvider>, state:
   const code = await streamToConsole(provider, prompt, SYSTEM_CODE);
   writeFileSync(join(state.featureDir!, 'implement.md'), code, 'utf-8');
 
-  // Écriture des fichiers sur disque
-  const blocks = [...code.matchAll(/## Fichier:\s*(.+?)\n```(?:\w+)?\n([\s\S]+?)```/g)];
-  let written = 0;
-  for (const [, filePath, content] of blocks) {
-    const fullPath = join(process.cwd(), filePath.trim());
-    mkdirSync(join(fullPath, '..'), { recursive: true });
-    writeFileSync(fullPath, content, 'utf-8');
-    console.log(chalk.green(`  ✓ ${filePath.trim()}`));
-    written++;
-  }
-
-  if (written === 0) {
+  // ── Diff interactif avant écriture ──
+  const parsedFiles = parseGeneratedFiles(code, process.cwd());
+  if (parsedFiles.length > 0) {
+    const writeResult = await interactiveDiffWrite(parsedFiles, process.cwd());
+    console.log(chalk.green(`\n  ${writeResult.written.length} fichier(s) écrits`));
+    if (writeResult.skipped.length > 0) {
+      console.log(chalk.dim(`  ${writeResult.skipped.length} fichier(s) ignorés`));
+    }
+  } else {
     console.log(chalk.yellow('  Aucun fichier extrait — l\'IA n\'a pas utilisé le format ## Fichier:'));
     console.log(chalk.dim(`  Le code complet est dans : ${join(state.featureDir!, 'implement.md')}`));
-  } else {
-    console.log(chalk.green(`\n  ${written} fichier(s) créé(s) dans le projet`));
   }
 
   return { action: 'next', data: undefined };
@@ -445,7 +445,7 @@ async function stepImplement(provider: ReturnType<typeof createProvider>, state:
 
 // ─── Machine à états ──────────────────────────────────────────────────────────
 
-export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: boolean }): Promise<void> {
+export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: boolean; pr?: boolean }): Promise<void> {
   showBanner();
   p.intro(chalk.cyan('SANDYKIT Dev — Agent autonome spec → code'));
 
@@ -458,6 +458,17 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
   if (stack.language.length || stack.framework.length) {
     console.log(chalk.dim(`  Stack détecté : ${stack.summary}\n`));
   }
+
+  // ── RAG : indexation du codebase existant ──
+  const ragSpinner = p.spinner();
+  ragSpinner.start('Analyse du codebase existant...');
+  const ragContext = buildRAGContext(process.cwd(), '', 5_000);
+  ragSpinner.stop(ragContext.chunks.length > 0
+    ? `${ragContext.chunks.length} fichier(s) de contexte indexés`
+    : 'Nouveau projet — aucun contexte existant'
+  );
+  // Attacher le contexte RAG au state pour l'injecter dans les prompts
+  (state as any).ragContext = ragContext;
 
   // ── Checkpoint : propose de reprendre ──
   // ── Choix du template de projet ──
@@ -617,12 +628,28 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
       }
 
       case 6: { // Implémentation
-        // ── Estimation de coût avant de lancer ──
+        // ── Estimation de coût + vérification budget ──
         if (state.input && state.providerCfg?.model) {
           const est = estimateCost(state.providerCfg.model, state.providerCfg.type, state.input);
           console.log(chalk.bold('\n  Estimation de coût :\n'));
           console.log(formatCostEstimate(est));
           console.log();
+
+          // Vérification budget mensuel
+          const budgetCheck = checkBudget(process.cwd(), est.estimatedUSD);
+          if (!budgetCheck.allowed) {
+            console.log(chalk.red(`  ✗ ${budgetCheck.reason}`));
+            console.log(chalk.dim('  Modifie le budget : sandykit budget set <montant>'));
+            clearCheckpoint();
+            step++;
+            break;
+          }
+          if (budgetCheck.shouldAlert && state.webhookUrl) {
+            sendBudgetAlert(state.webhookUrl, budgetCheck.status);
+          }
+          if (budgetCheck.status.percentUsed >= 80 && budgetCheck.status.limitUSD !== Infinity) {
+            console.log(chalk.yellow(`  ⚠ Budget à ${budgetCheck.status.percentUsed}% ($${budgetCheck.status.spentUSD.toFixed(3)} / $${budgetCheck.status.limitUSD.toFixed(2)})`));
+          }
         }
 
         // ── Mode dry-run : s'arrête ici ──
@@ -683,6 +710,41 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
             if (commitTests.success && !commitTests.skipped) console.log(chalk.dim(`  git: ${commitTests.sha} — ${commitTests.message}`));
           }
           if (state.webhookUrl) runWebhook(state.webhookUrl, { step: 'implement', projectName: state.projectName!, timestamp: new Date().toISOString() });
+
+          // ── Enregistrement coût réel ──
+          if (state.providerCfg?.model) {
+            recordUsage(process.cwd(), {
+              projectName: state.projectName ?? 'unknown',
+              step: 'implement',
+              model: state.providerCfg.model,
+              provider: state.providerCfg.type,
+              inputTokens: Math.ceil((state.spec?.length ?? 0 + (state.plan?.length ?? 0) + (state.tasks?.length ?? 0)) / 4),
+              outputTokens: Math.ceil(8000),
+            });
+          }
+
+          // ── Pull Request automatique ──
+          if (opts.pr) {
+            if (ghAvailable(process.cwd())) {
+              const prSpinner = p.spinner();
+              prSpinner.start('Création de la Pull Request...');
+              const pr = await createPullRequest(process.cwd(), {
+                projectName: state.projectName!,
+                spec: state.spec!,
+                plan: state.plan!,
+                tasks: state.tasks!,
+                draft: false,
+              });
+              if (pr.success) {
+                prSpinner.stop('Pull Request créée !');
+                console.log(chalk.cyan(`  → ${pr.url}`));
+              } else {
+                prSpinner.stop(`PR non créée : ${pr.error}`);
+              }
+            } else {
+              console.log(chalk.yellow('  ⚠ gh CLI non disponible — installe depuis https://cli.github.com'));
+            }
+          }
 
           clearCheckpoint();
           step++;
