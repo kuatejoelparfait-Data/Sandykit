@@ -1,53 +1,93 @@
 ---
-description: Implémenter toutes les tâches du plan une par une en suivant le TDD.
+description: Implémenter les tâches du plan en TDD. Lit automatiquement les specs générées par sandykit dev ou sandykit.tasks.
 handoffs:
   - label: Réviser le code
     agent: sandykit.review
     prompt: Révise l'implémentation
+  - label: Voir l'état du projet
+    agent: sandykit.continue
+    prompt: Montre l'état actuel du projet
 ---
 
 ## Entrée utilisateur
 
 $ARGUMENTS
 
-(filtre optionnel : numéro de tâche ou mot-clé)
+(optionnel : numéro de tâche, nom de feature, ou vide pour reprendre automatiquement)
 
 ## Étapes
 
-1. **Lis les tâches** : `specs/NNN-nom/tasks.md`
-2. **Lis le plan** : `specs/NNN-nom/plan.md`
-3. **Lis la spec** : `specs/NNN-nom/spec.md`
+### 1. Trouver le dossier de travail
 
-4. **Pour chaque tâche** (dans l'ordre) :
+**Priorité 1** — lis `.sandykit/last-session.json` si présent → utilise `featureDir`
 
-   a. Annonce : `## Tâche N : [Titre]`
+**Priorité 2** — si un argument est fourni, cherche le dossier `specs/` correspondant
 
-   b. **Écris le test d'abord** (TDD) :
-      - Test qui échoue pour le comportement attendu
-      - Lance les tests → vérifie qu'ils échouent
+**Priorité 3** — scanne `specs/` et prends le dossier le plus récent avec `tasks.md`
 
-   c. **Implémente le code minimal** :
-      - Juste ce qu'il faut pour faire passer les tests
-      - Respecte les patterns existants du projet
+### 2. Lire les fichiers de contexte
 
-   d. **Lance les tests** → vérifie qu'ils passent
+Dans le dossier trouvé, lis dans cet ordre :
+1. `tasks.md` — liste des tâches (vérifie les `- [x]` déjà cochées)
+2. `plan.md` — architecture, stack, structure des fichiers
+3. `spec.md` — exigences fonctionnelles et critères de succès
 
-   e. **Commit** :
-      ```
-      git add [fichiers]
-      git commit -m "feat: [description courte]"
-      ```
+**Ne régénère RIEN.** Ces fichiers contiennent déjà tout le contexte.
 
-   f. Coche la tâche dans `tasks.md` : `- [x]`
+### 3. Identifier les tâches restantes
 
-5. **Rapport final** :
-   - Liste des tâches complétées
-   - Tests passants
-   - Fichiers créés/modifiés
+- Tâches cochées `- [x]` → déjà faites, skip
+- Tâches non cochées `- [ ]` → à implémenter
+- Si filtre fourni en argument → commence par cette tâche
 
-## Règles
+Annonce : `X tâche(s) restante(s) sur Y au total`
 
-- Une tâche à la fois, toujours dans l'ordre
-- Ne jamais skipper les tests
-- Commit après chaque tâche
-- Si bloqué sur une tâche : documente le blocage et passe à la suivante
+### 4. Pour chaque tâche non cochée (dans l'ordre)
+
+**a. Annonce la tâche**
+```
+## Tâche N : [Titre]
+```
+
+**b. Écris le test d'abord (TDD)**
+- Test unitaire qui échoue pour le comportement attendu
+- Lance les tests → confirme qu'ils échouent
+
+**c. Implémente le code minimal**
+- Juste ce qu'il faut pour faire passer les tests
+- Respecte les patterns existants dans le projet
+- Respecte la stack du `plan.md`
+
+**d. Lance les tests** → confirme qu'ils passent
+
+**e. Commit**
+```
+git add [fichiers modifiés]
+git commit -m "feat([nom-feature]): [description courte]"
+```
+
+**f. Coche la tâche dans `tasks.md`**
+```
+- [x] [titre de la tâche]
+```
+
+### 5. Rapport final
+
+```
+Implémentation terminée
+
+Tâches complétées : X/Y
+Tests passants   : N
+Fichiers créés   : [liste]
+Fichiers modifiés: [liste]
+
+Prochaine étape : /sandykit.review
+```
+
+## Règles absolues
+
+- **Ne jamais régénérer spec.md, plan.md ou tasks.md** — ils existent déjà
+- **Ne jamais skipper les tests** — TDD obligatoire
+- **Commit après chaque tâche** — pas de mega-commit final
+- **Si bloqué** : documente le blocage dans `tasks.md` et passe à la suivante
+- **Respecter la stack** du `plan.md` — ne pas inventer une autre technologie

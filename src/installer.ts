@@ -10,7 +10,7 @@ const _dirname: string =
     : dirname(fileURLToPath((import.meta as { url?: string }).url ?? ''));
 const TEMPLATES_DIR = join(_dirname, 'templates', 'commands');
 
-const COMMANDS = ['specify', 'clarify', 'plan', 'tasks', 'implement', 'review', 'back'] as const;
+const COMMANDS = ['specify', 'clarify', 'plan', 'tasks', 'implement', 'review', 'back', 'continue'] as const;
 
 interface IntegrationPaths {
   commandsDir: string;
@@ -33,6 +33,16 @@ export function getIntegrationPaths(integration: Integration, rootDir: string): 
       return {
         commandsDir: join(rootDir, '.github', 'instructions'),
         extension: '.instructions.md',
+      };
+    case 'codex':
+      return {
+        commandsDir: join(rootDir, '.codex'),
+        extension: '.md',
+      };
+    case 'antigravity':
+      return {
+        commandsDir: join(rootDir, '.antigravity'),
+        extension: '.md',
       };
   }
 }

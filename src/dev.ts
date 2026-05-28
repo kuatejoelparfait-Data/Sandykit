@@ -975,6 +975,21 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
           }
 
           clearCheckpoint();
+
+          // ── Fichier de liaison pour slash commands ──
+          const sandykitDir = join(process.cwd(), '.sandykit');
+          mkdirSync(sandykitDir, { recursive: true });
+          writeFileSync(
+            join(sandykitDir, 'last-session.json'),
+            JSON.stringify({
+              projectName: state.projectName,
+              featureDir: state.featureDir?.replace(process.cwd() + '/', '').replace(process.cwd() + '\\', ''),
+              completedSteps: ['spec', 'plan', 'tasks', 'implement'],
+              updatedAt: new Date().toISOString(),
+            }, null, 2),
+            'utf-8'
+          );
+
           step++;
         }
         break;
@@ -982,6 +997,8 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
     }
   }
 
-  const slug = (state.projectName ?? 'projet').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-  p.outro(chalk.green(`✓ Projet "${state.projectName}" livré — specs dans ${state.featureDir?.replace(process.cwd(), '.')}`));
+  p.outro(chalk.green(`✓ Projet "${state.projectName}" livre — specs dans ${state.featureDir?.replace(process.cwd(), '.')}`));
+  console.log(chalk.dim('\n  Pour continuer dans ton agent IA (Claude Code, Cursor...) :'));
+  console.log(chalk.cyan('  /sandykit.continue') + chalk.dim('  →  reprend exactement ou tu en es'));
+  console.log(chalk.cyan('  /sandykit.review  ') + chalk.dim('  →  revue du code genere\n'));
 }

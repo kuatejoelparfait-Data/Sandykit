@@ -1,4 +1,4 @@
-export type Integration = 'claude' | 'cursor' | 'copilot';
+export type Integration = 'claude' | 'cursor' | 'copilot' | 'codex' | 'antigravity';
 
 export interface SandykitConfig {
   projectName: string;
