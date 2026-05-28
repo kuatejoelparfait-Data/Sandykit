@@ -4,7 +4,7 @@
 
 SANDYKIT est un outil CLI TypeScript avec **deux modes** :
 
-- **Mode Commandes** (v2) — installe des slash commands dans ton agent IA (Claude Code, Cursor, Copilot) pour guider le développement étape par étape
+- **Mode Commandes** (v2) — installe des slash commands dans ton agent IA (Claude Code, Cursor, GitHub Copilot, Codex, Anti Gravity) pour guider le développement étape par étape
 - **Mode Autonome** (v3) — lit un cahier des charges, génère la spec, le plan, les tâches, le code, les tests et commit tout automatiquement
 
 ---
@@ -31,7 +31,7 @@ SANDYKIT est un outil CLI TypeScript avec **deux modes** :
 - Node.js ≥ 18
 - npm ≥ 9
 - Git (recommandé)
-- Un agent IA : Claude Code, Cursor ou GitHub Copilot (pour le Mode Commandes)
+- Un agent IA : Claude Code, Cursor, GitHub Copilot, Codex ou Anti Gravity (pour le Mode Commandes)
 - Une clé API : Anthropic, OpenAI, ou Ollama installé localement (pour le Mode Autonome)
 
 ### Installer SANDYKIT globalement
@@ -73,6 +73,8 @@ L'assistant interactif te demande :
    - `Claude Code` → installe dans `.claude/commands/`
    - `Cursor` → installe dans `.cursor/rules/`
    - `GitHub Copilot` → installe dans `.github/instructions/`
+   - `Codex` → installe dans `.codex/`
+   - `Anti Gravity` → installe dans `.antigravity/`
 
 ```
 ┌  SANDYKIT — Initialisation
@@ -84,6 +86,8 @@ L'assistant interactif te demande :
 │  ◉ Claude Code
 │  ○ Cursor
 │  ○ GitHub Copilot
+│  ○ Codex
+│  ○ Anti Gravity
 │
 ◆  Confirmer l'installation ?
 │  ● Oui  ○ Non
@@ -101,8 +105,14 @@ claude .
 # Cursor
 cursor .
 
-# VS Code + Copilot
+# VS Code + GitHub Copilot
 code .
+
+# Codex (OpenAI)
+codex
+
+# Anti Gravity
+antigravity .
 ```
 
 > ⚠️ Important : ouvre l'agent **dans le dossier du projet**, pas dans le dossier SANDYKIT.
@@ -778,6 +788,12 @@ mon-projet/
 ├── .github/                    ← instructions GitHub Copilot
 │   └── instructions/
 │       └── sandykit-*.instructions.md
+│
+├── .codex/                     ← commandes Codex (OpenAI)
+│   └── sandykit-*.md
+│
+├── .antigravity/               ← commandes Anti Gravity
+│   └── sandykit-*.md
 │
 ├── specs/                      ← toutes tes features
 │   ├── 001-auth-jwt/

@@ -21,7 +21,7 @@ export function showBanner(): void {
         '\n' +
         chalk.dim('Claude Code  Cursor  GitHub Copilot') +
         '\n' +
-        chalk.dim('                                    ') +
+        chalk.dim('Codex  Anti Gravity') +
         '\n' +
         chalk.dim('By Kuate Joel Parfait'),
       {
