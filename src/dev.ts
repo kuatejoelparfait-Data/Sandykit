@@ -25,6 +25,36 @@ import { createPullRequest, ghAvailable } from './pr-creator.js';
 
 type StepResult<T> = { action: 'next'; data: T } | { action: 'back' } | { action: 'cancel' };
 
+// ─── Menu numéroté (évite les bugs de redraw de @clack sur Windows) ───────────
+
+async function numMenu<T extends string>(
+  message: string,
+  options: { value: T; label: string }[],
+  backLabel?: string
+): Promise<T | '__back__' | symbol> {
+  console.log(chalk.cyan(`\n  ${message}\n`));
+  options.forEach((opt, i) => {
+    console.log(chalk.white(`  ${chalk.bold(String(i + 1))}.  ${opt.label}`));
+  });
+  if (backLabel) {
+    console.log(chalk.dim(`  0.  ${backLabel}`));
+  }
+  console.log('');
+  const max = options.length;
+  const answer = await p.text({
+    message: backLabel ? `Choix [0-${max}] :` : `Choix [1-${max}] :`,
+    validate: (v) => {
+      const n = parseInt(v.trim());
+      const min = backLabel ? 0 : 1;
+      if (isNaN(n) || n < min || n > max) return `Entrez un nombre entre ${min} et ${max}`;
+    },
+  });
+  if (p.isCancel(answer)) return answer as symbol;
+  const n = parseInt((answer as string).trim());
+  if (n === 0) return '__back__';
+  return options[n - 1].value;
+}
+
 interface DevState {
   providerCfg?: ProviderConfig;
   projectName?: string;
@@ -84,21 +114,67 @@ async function streamToConsole(
 
 async function actionMenu(label: string, canGoBack: boolean): Promise<'ok' | 'refine' | 'edit' | 'back' | 'cancel'> {
   const options: Array<{ value: string; label: string }> = [
-    { value: 'ok',     label: '✓  Valider et continuer' },
-    { value: 'refine', label: '↺  Régénérer (ajouter des précisions)' },
-    { value: 'edit',   label: '✏  Modifier manuellement le fichier' },
+    { value: 'ok',     label: 'Valider et continuer' },
+    { value: 'refine', label: 'Regenerer (ajouter des precisions)' },
+    { value: 'edit',   label: 'Modifier manuellement le fichier' },
+    { value: 'cancel', label: 'Annuler' },
   ];
-  if (canGoBack) options.push({ value: 'back', label: '←  Étape précédente' });
-  options.push({ value: 'cancel', label: '✗  Annuler' });
 
-  const choice = await p.select({ message: `${label} — que faire ?`, options });
+  const choice = await numMenu(
+    `${label} — que faire ?`,
+    options,
+    canGoBack ? '0  <- Etape precedente' : undefined
+  );
   if (p.isCancel(choice)) return 'cancel';
-  return choice as 'ok' | 'refine' | 'edit' | 'back' | 'cancel';
+  if (choice === '__back__') return 'back';
+  return choice as 'ok' | 'refine' | 'edit' | 'cancel';
 }
 
-async function confirmCancel(): Promise<boolean> {
-  const sure = await p.confirm({ message: 'Voulez-vous vraiment annuler ?', initialValue: false });
-  return !p.isCancel(sure) && (sure as boolean);
+// ─── Wrappers universels (0 = retour, Ctrl+C = retour) ──────────────────────
+
+async function askText(opts: {
+  message: string;
+  placeholder?: string;
+  defaultValue?: string;
+  optional?: boolean;
+}): Promise<string | '__back__'> {
+  const result = await p.text({
+    message: opts.message + chalk.dim('  [0 = retour]'),
+    placeholder: opts.placeholder,
+    defaultValue: opts.defaultValue,
+    validate: v => {
+      if (v?.trim() === '0') return undefined;
+      if (!opts.optional && !v?.trim()) return 'Requis — ou tapez 0 pour revenir';
+    },
+  });
+  if (p.isCancel(result) || (result as string)?.trim() === '0') return '__back__';
+  return result as string;
+}
+
+async function askPassword(opts: {
+  message: string;
+  minLen?: number;
+  optional?: boolean;
+}): Promise<string | '__back__'> {
+  const result = await p.password({
+    message: opts.message + chalk.dim('  [0 = retour]'),
+    validate: v => {
+      if (v?.trim() === '0') return undefined;
+      if (!opts.optional && opts.minLen && v.trim().length < opts.minLen)
+        return `Minimum ${opts.minLen} caracteres — ou tapez 0 pour revenir`;
+    },
+  });
+  if (p.isCancel(result) || (result as string)?.trim() === '0') return '__back__';
+  return result as string;
+}
+
+async function askConfirm(message: string): Promise<boolean> {
+  const choice = await numMenu(message, [
+    { value: 'yes', label: 'Oui' },
+    { value: 'no',  label: 'Non, continuer' },
+  ]);
+  if (p.isCancel(choice) || choice === '__back__' || choice === 'no') return false;
+  return true;
 }
 
 // ─── Étapes ───────────────────────────────────────────────────────────────────
@@ -106,83 +182,100 @@ async function confirmCancel(): Promise<boolean> {
 async function stepProvider(state: DevState): Promise<StepResult<ProviderConfig>> {
   p.intro(chalk.bold('① Provider IA'));
 
+  // ── Provider sauvegarde : proposer de le reutiliser ──
   const cfg = loadConfig();
   if (cfg?.provider) {
-    const reuse = await p.select({
-      message: `Provider sauvegardé : ${chalk.cyan(cfg.provider.type)} — ${cfg.provider.model ?? 'modèle par défaut'}`,
-      options: [
-        { value: 'reuse',  label: '✓  Utiliser ce provider' },
-        { value: 'change', label: '↺  Changer de provider' },
-        { value: 'cancel', label: '✗  Annuler' },
+    const reuse = await numMenu(
+      `Provider sauvegarde : ${cfg.provider.type} — ${cfg.provider.model ?? 'modele par defaut'}`,
+      [
+        { value: 'reuse',  label: 'Utiliser ce provider' },
+        { value: 'change', label: 'Changer de provider' },
+        { value: 'cancel', label: 'Annuler' },
       ],
-    });
-    if (p.isCancel(reuse) || reuse === 'cancel') {
-      if (await confirmCancel()) cancel();
-      return stepProvider(state);
+      '0  <- Retour au choix du projet'
+    );
+    if (p.isCancel(reuse) || reuse === 'cancel') { if (await askConfirm('Quitter SANDYKIT ?')) cancel(); return stepProvider(state); }
+    if (reuse === '__back__') return { action: 'back' };
+    if (reuse === 'reuse') {
+      // Récupérer la clé API depuis le keystore (non stockée dans le fichier config)
+      let savedApiKey: string | undefined;
+      if (cfg.provider.type === 'claude' || cfg.provider.type === 'openai') {
+        savedApiKey = await getApiKey(cfg.provider.type) ?? undefined;
+        if (!savedApiKey) {
+          const envKey = cfg.provider.type === 'claude' ? process.env['ANTHROPIC_API_KEY'] : process.env['OPENAI_API_KEY'];
+          savedApiKey = envKey;
+        }
+      }
+      return { action: 'next', data: { ...cfg.provider, apiKey: savedApiKey } };
     }
-    if (reuse === 'reuse') return { action: 'next', data: cfg.provider };
   }
 
-  const providerType = await p.select({
-    message: 'Quel provider IA ?',
-    options: [
-      { value: 'claude',  label: 'Claude (Anthropic)',    hint: 'API key requise' },
-      { value: 'openai',  label: 'OpenAI (GPT-4o...)',    hint: 'API key requise' },
-      { value: 'ollama',  label: 'Ollama (local)',         hint: 'Aucune clé, modèle local' },
-      { value: 'custom',  label: 'Provider personnalisé', hint: 'URL + clé compatible OpenAI' },
-    ],
-  });
-  if (p.isCancel(providerType)) { if (await confirmCancel()) cancel(); return stepProvider(state); }
-  const type = providerType as ProviderType;
+  // ── Choix du provider ──
+  const providerChoice = await numMenu('Quel provider IA ?', [
+    { value: 'claude', label: 'Claude  (Anthropic) — API key requise' },
+    { value: 'openai', label: 'OpenAI  (GPT-4o...) — API key requise' },
+    { value: 'ollama', label: 'Ollama  (local)     — aucune cle, gratuit' },
+    { value: 'custom', label: 'Provider personnalise — URL compatible OpenAI' },
+  ], '0  <- Retour au choix du projet');
+  if (p.isCancel(providerChoice)) return { action: 'back' };
+  if (providerChoice === '__back__') return { action: 'back' };
+  const type = providerChoice as ProviderType;
 
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
   let model: string | undefined;
 
+  // ── Cle API ──
   if (type === 'claude' || type === 'openai') {
-    const key = await p.password({
-      message: `Clé API ${type === 'claude' ? 'Anthropic' : 'OpenAI'} :`,
-      validate: v => (v.trim().length < 10 ? 'Clé invalide' : undefined),
-    });
-    if (p.isCancel(key)) { if (await confirmCancel()) cancel(); return stepProvider(state); }
-    apiKey = key as string;
+    const envKey = type === 'claude' ? process.env['ANTHROPIC_API_KEY'] : process.env['OPENAI_API_KEY'];
+    if (envKey) {
+      console.log(chalk.green(`  Cle API detectee depuis variable d'environnement.\n`));
+      apiKey = envKey;
+    } else {
+      const key = await askPassword({
+        message: `Cle API ${type === 'claude' ? 'Anthropic' : 'OpenAI'} :`,
+        minLen: 10,
+      });
+      if (key === '__back__') return stepProvider(state);
+      apiKey = key;
+    }
   }
 
+  // ── URL base (Ollama / custom) ──
   if (type === 'ollama' || type === 'custom') {
-    const url = await p.text({
+    const url = await askText({
       message: type === 'ollama' ? 'URL Ollama :' : 'URL du provider :',
       placeholder: type === 'ollama' ? 'http://localhost:11434' : 'https://api.example.com',
       defaultValue: type === 'ollama' ? 'http://localhost:11434' : '',
     });
-    if (p.isCancel(url)) { if (await confirmCancel()) cancel(); return stepProvider(state); }
-    baseUrl = url as string;
+    if (url === '__back__') return stepProvider(state);
+    baseUrl = url;
     if (type === 'custom') {
-      const key = await p.password({ message: 'Clé API (laisser vide si non requise) :' });
-      if (!p.isCancel(key) && key) apiKey = key as string;
+      const key = await askPassword({ message: 'Cle API (0 pour ignorer) :', optional: true });
+      if (key !== '__back__' && key) apiKey = key;
     }
   }
 
+  // ── Choix du modele ──
   const models = PROVIDER_MODELS[type];
   if (models.length > 0) {
-    const modelChoice = await p.select({
-      message: 'Modèle :',
-      options: [
-        ...models.map(m => ({ value: m, label: m })),
-        { value: '__custom__', label: 'Autre (saisir manuellement)' },
-      ],
-    });
-    if (p.isCancel(modelChoice)) { if (await confirmCancel()) cancel(); return stepProvider(state); }
+    const modelOpts = [
+      ...models.map(m => ({ value: m, label: m })),
+      { value: '__custom__', label: 'Autre modele (saisir manuellement)' },
+    ];
+    const modelChoice = await numMenu('Modele :', modelOpts, '0  <- Changer de provider');
+    if (p.isCancel(modelChoice) || modelChoice === '__back__') return stepProvider(state);
     if (modelChoice === '__custom__') {
-      const custom = await p.text({ message: 'Nom du modèle :', validate: v => (!v ? 'Requis' : undefined) });
-      if (p.isCancel(custom)) { if (await confirmCancel()) cancel(); return stepProvider(state); }
-      model = custom as string;
+      const custom = await askText({ message: 'Nom du modele :' });
+      if (custom === '__back__') return stepProvider(state);
+      model = custom;
     } else {
       model = modelChoice as string;
     }
   } else {
-    const custom = await p.text({ message: 'Nom du modèle :', validate: v => (!v ? 'Requis' : undefined) });
-    if (p.isCancel(custom)) { if (await confirmCancel()) cancel(); return stepProvider(state); }
-    model = custom as string;
+    const custom = await askText({ message: 'Nom du modele :' });
+    if (custom === '__back__') return stepProvider(state);
+    model = custom;
   }
 
   return { action: 'next', data: { type, apiKey, baseUrl, model } };
@@ -191,75 +284,67 @@ async function stepProvider(state: DevState): Promise<StepResult<ProviderConfig>
 async function stepProjectName(state: DevState): Promise<StepResult<string>> {
   p.intro(chalk.bold('② Nom du projet'));
 
-  const nameResult = await p.text({
-    message: 'Nom du projet :',
-    placeholder: process.cwd().split(/[/\\]/).pop() ?? 'mon-projet',
-    defaultValue: state.projectName ?? process.cwd().split(/[/\\]/).pop() ?? 'mon-projet',
-  });
-  if (p.isCancel(nameResult)) { if (await confirmCancel()) cancel(); return stepProjectName(state); }
+  while (true) {
+    const nameResult = await askText({
+      message: 'Nom du projet :',
+      placeholder: process.cwd().split(/[/\\]/).pop() ?? 'mon-projet',
+      defaultValue: state.projectName ?? process.cwd().split(/[/\\]/).pop() ?? 'mon-projet',
+    });
+    if (nameResult === '__back__') return { action: 'back' };
 
-  const confirm = await p.select({
-    message: `Projet : "${nameResult}"`,
-    options: [
-      { value: 'ok',     label: '✓  Continuer' },
-      { value: 'back',   label: '←  Changer de provider' },
-      { value: 'cancel', label: '✗  Annuler' },
-    ],
-  });
-  if (p.isCancel(confirm) || confirm === 'cancel') { if (await confirmCancel()) cancel(); return stepProjectName(state); }
-  if (confirm === 'back') return { action: 'back' };
-  return { action: 'next', data: nameResult as string };
+    const confirm = await numMenu(`Projet : "${nameResult}"`, [
+      { value: 'ok',     label: 'Continuer' },
+      { value: 'redo',   label: 'Changer le nom' },
+    ], '0  <- Changer de provider');
+    if (p.isCancel(confirm) || confirm === '__back__') return { action: 'back' };
+    if (confirm === 'redo') continue;
+    return { action: 'next', data: nameResult };
+  }
 }
 
 async function stepInput(state: DevState, filePath?: string): Promise<StepResult<string>> {
   p.intro(chalk.bold('③ Description du projet'));
 
-  let input = '';
+  while (true) {
+    let input = '';
 
-  if (filePath) {
-    const spinner = p.spinner();
-    spinner.start(`Lecture de ${filePath}...`);
-    try {
-      input = await readCahierDesCharges(filePath);
-      spinner.stop(`Fichier lu — ${input.length} caractères`);
-      console.log(chalk.dim(input.slice(0, 300) + (input.length > 300 ? '...' : '')));
-    } catch (e) {
-      spinner.stop('Erreur de lecture');
-      console.log(chalk.red((e as Error).message));
+    if (filePath) {
+      const spinner = p.spinner();
+      spinner.start(`Lecture de ${filePath}...`);
+      try {
+        input = await readCahierDesCharges(filePath);
+        spinner.stop(`Fichier lu — ${input.length} caracteres`);
+        console.log(chalk.dim(input.slice(0, 300) + (input.length > 300 ? '...' : '')));
+      } catch (e) {
+        spinner.stop('Erreur de lecture');
+        console.log(chalk.red((e as Error).message));
+      }
     }
-  }
 
-  const manualResult = await p.text({
-    message: filePath
-      ? 'Ajouter des précisions au cahier des charges ? (Entrée pour ignorer) :'
-      : 'Décris ton projet :',
-    placeholder: filePath
-      ? 'Contraintes, stack préférée, détails supplémentaires...'
-      : 'Une app de gestion de tâches avec authentification et tableau de bord...',
-    defaultValue: state.input && !filePath ? state.input : undefined,
-  });
-  if (!p.isCancel(manualResult) && manualResult) {
-    input = input ? `${input}\n\n---\nPrécisions :\n${manualResult}` : (manualResult as string);
-  }
+    const manualResult = await askText({
+      message: filePath ? 'Precisions supplementaires ? (0 = retour, Entree = ignorer) :' : 'Decris ton projet :',
+      placeholder: filePath ? 'Contraintes, stack preferee...' : 'Une app de gestion de taches avec authentification...',
+      defaultValue: state.input && !filePath ? state.input : undefined,
+      optional: !!filePath,
+    });
+    if (manualResult === '__back__') return { action: 'back' };
+    if (manualResult) {
+      input = input ? `${input}\n\n---\nPrecisions :\n${manualResult}` : manualResult;
+    }
 
-  if (!input.trim()) {
-    console.log(chalk.red('  Description requise.'));
-    return stepInput(state, filePath);
-  }
+    if (!input.trim()) {
+      console.log(chalk.red('  Description requise.'));
+      continue;
+    }
 
-  const confirm = await p.select({
-    message: 'Description prête ?',
-    options: [
-      { value: 'ok',     label: '✓  Continuer vers la spec' },
-      { value: 'redo',   label: '↺  Réécrire la description' },
-      { value: 'back',   label: '←  Changer le nom du projet' },
-      { value: 'cancel', label: '✗  Annuler' },
-    ],
-  });
-  if (p.isCancel(confirm) || confirm === 'cancel') { if (await confirmCancel()) cancel(); return stepInput(state, filePath); }
-  if (confirm === 'back') return { action: 'back' };
-  if (confirm === 'redo') return stepInput({ ...state, input: undefined }, filePath);
-  return { action: 'next', data: input };
+    const confirm = await numMenu('Description prete ?', [
+      { value: 'ok',   label: 'Continuer vers la spec' },
+      { value: 'redo', label: 'Reecrire la description' },
+    ], '0  <- Changer le nom du projet');
+    if (p.isCancel(confirm) || confirm === '__back__') return { action: 'back' };
+    if (confirm === 'redo') { state = { ...state, input: undefined }; continue; }
+    return { action: 'next', data: input };
+  }
 }
 
 async function stepSpec(provider: ReturnType<typeof createProvider>, state: DevState): Promise<StepResult<string>> {
@@ -274,27 +359,27 @@ async function stepSpec(provider: ReturnType<typeof createProvider>, state: DevS
     const stackCtx    = state.stack    ? stackToPromptContext(state.stack) : '';
     const templateCtx = state.template?.specPromptBoost ? `\n\n## Directives du template ${state.template.label}\n${state.template.specPromptBoost}` : '';
     const stackHint   = state.template?.stackHint ? `\n\nStack cible : ${state.template.stackHint}` : '';
-    const ragSection  = (state as any).ragContext ? formatRAGContextForPrompt((state as any).ragContext) : '';
+    const ragSection  = state.ragContext ? formatRAGContextForPrompt(state.ragContext) : '';
     const prompt = `Voici la description du projet :\n\n${state.input}${additions ? `\n\nPrécisions :\n${additions}` : ''}${stackCtx ? `\n\n${stackCtx}` : ''}${templateCtx}${stackHint}${ragSection ? `\n\n${ragSection}` : ''}\n\nGénère une spécification fonctionnelle complète en markdown : scénarios utilisateur, exigences fonctionnelles, critères de succès, hors périmètre.`;
     spinner.stop('Spec générée :');
     spec = await streamToConsole(provider, prompt, SYSTEM_SPEC);
 
     const action = await actionMenu('Spécification', true);
 
-    if (action === 'cancel') { if (await confirmCancel()) cancel(); continue; }
+    if (action === 'cancel') { if (await askConfirm('Annuler et quitter ?')) cancel(); continue; }
     if (action === 'back') return { action: 'back' };
     if (action === 'ok') return { action: 'next', data: spec };
 
     if (action === 'refine') {
-      const add = await p.text({ message: 'Précisions pour la spec :', placeholder: 'Contrainte de sécurité, persona spécifique...' });
-      if (!p.isCancel(add) && add) additions = add as string;
+      const add = await askText({ message: 'Precisions pour la spec :', placeholder: 'Contrainte de securite, persona specifique...' });
+      if (add !== '__back__' && add) additions = add;
       continue;
     }
 
     if (action === 'edit') {
       writeFileSync(join(state.featureDir!, 'spec.md'), spec, 'utf-8');
-      console.log(chalk.yellow(`\nÉdite le fichier puis reviens ici :\n  ${join(state.featureDir!, 'spec.md')}`));
-      await p.text({ message: 'Appuie sur Entrée quand tu as terminé...' });
+      console.log(chalk.yellow(`\nEdite le fichier puis reviens ici :\n  ${join(state.featureDir!, 'spec.md')}`));
+      await askText({ message: 'Appuie sur Entree quand tu as termine...', optional: true });
       spec = readFileSync(join(state.featureDir!, 'spec.md'), 'utf-8');
       return { action: 'next', data: spec };
     }
@@ -319,20 +404,20 @@ async function stepPlan(provider: ReturnType<typeof createProvider>, state: DevS
 
     const action = await actionMenu('Plan technique', true);
 
-    if (action === 'cancel') { if (await confirmCancel()) cancel(); continue; }
+    if (action === 'cancel') { if (await askConfirm('Annuler et quitter ?')) cancel(); continue; }
     if (action === 'back') return { action: 'back' };
     if (action === 'ok') return { action: 'next', data: plan };
 
     if (action === 'refine') {
-      const add = await p.text({ message: 'Précisions pour le plan :', placeholder: 'Stack spécifique, contrainte infra...' });
-      if (!p.isCancel(add) && add) additions = add as string;
+      const add = await askText({ message: 'Precisions pour le plan :', placeholder: 'Stack specifique, contrainte infra...' });
+      if (add !== '__back__' && add) additions = add;
       continue;
     }
 
     if (action === 'edit') {
       writeFileSync(join(state.featureDir!, 'plan.md'), plan, 'utf-8');
-      console.log(chalk.yellow(`\nÉdite :\n  ${join(state.featureDir!, 'plan.md')}`));
-      await p.text({ message: 'Entrée quand terminé...' });
+      console.log(chalk.yellow(`\nEdite :\n  ${join(state.featureDir!, 'plan.md')}`));
+      await askText({ message: 'Entree quand termine...', optional: true });
       plan = readFileSync(join(state.featureDir!, 'plan.md'), 'utf-8');
       return { action: 'next', data: plan };
     }
@@ -354,20 +439,20 @@ async function stepTasks(provider: ReturnType<typeof createProvider>, state: Dev
 
     const action = await actionMenu('Tâches', true);
 
-    if (action === 'cancel') { if (await confirmCancel()) cancel(); continue; }
+    if (action === 'cancel') { if (await askConfirm('Annuler et quitter ?')) cancel(); continue; }
     if (action === 'back') return { action: 'back' };
     if (action === 'ok') return { action: 'next', data: tasks };
 
     if (action === 'refine') {
-      const add = await p.text({ message: 'Précisions pour les tâches :', placeholder: 'Ordre de priorité, tâche manquante...' });
-      if (!p.isCancel(add) && add) additions = add as string;
+      const add = await askText({ message: 'Precisions pour les taches :', placeholder: 'Ordre de priorite, tache manquante...' });
+      if (add !== '__back__' && add) additions = add;
       continue;
     }
 
     if (action === 'edit') {
       writeFileSync(join(state.featureDir!, 'tasks.md'), tasks, 'utf-8');
-      console.log(chalk.yellow(`\nÉdite :\n  ${join(state.featureDir!, 'tasks.md')}`));
-      await p.text({ message: 'Entrée quand terminé...' });
+      console.log(chalk.yellow(`\nEdite :\n  ${join(state.featureDir!, 'tasks.md')}`));
+      await askText({ message: 'Entree quand termine...', optional: true });
       tasks = readFileSync(join(state.featureDir!, 'tasks.md'), 'utf-8');
       return { action: 'next', data: tasks };
     }
@@ -377,22 +462,19 @@ async function stepTasks(provider: ReturnType<typeof createProvider>, state: Dev
 async function stepImplement(provider: ReturnType<typeof createProvider>, state: DevState): Promise<StepResult<void>> {
   p.intro(chalk.bold('⑦ Implémentation'));
 
-  const proceed = await p.select({
-    message: 'Lancer l\'implémentation autonome ?',
-    options: [
-      { value: 'ok',     label: '✓  Oui, écrire le code' },
-      { value: 'back',   label: '←  Revoir les tâches' },
-      { value: 'cancel', label: '✗  Annuler' },
-    ],
-  });
-  if (p.isCancel(proceed) || proceed === 'cancel') { if (await confirmCancel()) cancel(); return stepImplement(provider, state); }
-  if (proceed === 'back') return { action: 'back' };
+  const proceed = await numMenu('Lancer l\'implementation autonome ?', [
+    { value: 'ok',     label: 'Oui, ecrire le code' },
+    { value: 'cancel', label: 'Annuler' },
+  ], '0  <- Revoir les taches');
+  if (p.isCancel(proceed) || proceed === 'cancel') { if (await askConfirm('Annuler et quitter ?')) cancel(); return stepImplement(provider, state); }
+  if (proceed === '__back__') return { action: 'back' };
 
-  const add = await p.text({
-    message: 'Précisions pour l\'implémentation ? (Entrée pour ignorer) :',
-    placeholder: 'Framework UI, version Node, contraintes spécifiques...',
+  const addResult = await askText({
+    message: 'Precisions pour l\'implementation ? (optionnel) :',
+    placeholder: 'Framework UI, version Node, contraintes specifiques...',
+    optional: true,
   });
-  const additions = (!p.isCancel(add) && add) ? add as string : '';
+  const additions = (addResult !== '__back__' && addResult) ? addResult : '';
 
   const spinner = p.spinner();
   spinner.start('Implémentation en cours...');
@@ -446,11 +528,11 @@ async function stepImplement(provider: ReturnType<typeof createProvider>, state:
 // ─── Machine à états ──────────────────────────────────────────────────────────
 
 export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: boolean; pr?: boolean }): Promise<void> {
-  showBanner();
+  // (banner affiché dans la boucle de sélection de categorie)
   p.intro(chalk.cyan('SANDYKIT Dev — Agent autonome spec → code'));
 
   if (opts.dryRun) {
-    console.log(chalk.yellow('  Mode --dry-run : spec + plan générés, aucun fichier de code écrit\n'));
+    console.log(chalk.yellow('  Mode --dry-run : spec + plan generes, aucun fichier de code ecrit\n'));
   }
 
   // ── Détection du stack existant ──
@@ -459,46 +541,193 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
     console.log(chalk.dim(`  Stack détecté : ${stack.summary}\n`));
   }
 
-  // ── RAG : indexation du codebase existant ──
-  const ragSpinner = p.spinner();
-  ragSpinner.start('Analyse du codebase existant...');
-  const ragContext = buildRAGContext(process.cwd(), '', 5_000);
-  ragSpinner.stop(ragContext.chunks.length > 0
-    ? `${ragContext.chunks.length} fichier(s) de contexte indexés`
-    : 'Nouveau projet — aucun contexte existant'
-  );
-  // Attacher le contexte RAG au state pour l'injecter dans les prompts
-  (state as any).ragContext = ragContext;
+  // ── RAG : indexation du codebase existant (seulement si projet existant) ──
+  const hasExistingProject = existsSync(join(process.cwd(), 'package.json'))
+    || existsSync(join(process.cwd(), 'pyproject.toml'))
+    || existsSync(join(process.cwd(), 'go.mod'))
+    || existsSync(join(process.cwd(), 'Cargo.toml'));
 
-  // ── Checkpoint : propose de reprendre ──
-  // ── Choix du template de projet ──
-  const templateChoice = await p.select({
-    message: 'Type de projet :',
-    options: PROJECT_TEMPLATES.map(t => ({ value: t.id, label: t.label, hint: t.hint })),
-  });
-  if (p.isCancel(templateChoice)) { p.cancel('Annulé'); return; }
-  const template = PROJECT_TEMPLATES.find(t => t.id === templateChoice)!;
+  let ragContext: ReturnType<typeof buildRAGContext> = { chunks: [], totalTokens: 0, summary: '' };
+  if (hasExistingProject) {
+    const ragSpinner = p.spinner();
+    ragSpinner.start('Analyse du codebase existant...');
+    ragContext = buildRAGContext(process.cwd(), '', 5_000);
+    ragSpinner.stop(ragContext.chunks.length > 0
+      ? `${ragContext.chunks.length} fichier(s) de contexte indexés`
+      : 'Aucun fichier source trouvé'
+    );
+  }
+
+  // ── Fonctions d'aide ──────────────────────────────────────────────────────
+
+  function showHelp(): void {
+    console.log('');
+    console.log(chalk.cyan('  ══════════════════════════════════════════════════'));
+    console.log(chalk.bold.white('  COMMENT CA MARCHE'));
+    console.log(chalk.cyan('  ══════════════════════════════════════════════════'));
+    console.log('');
+    console.log(chalk.white('  SANDYKIT suit un pipeline en 7 etapes :'));
+    console.log('');
+    console.log(chalk.bold('  1. Provider IA  ') + chalk.dim('→ choisir Claude, OpenAI ou Ollama'));
+    console.log(chalk.bold('  2. Nom projet   ') + chalk.dim('→ nommer ton projet'));
+    console.log(chalk.bold('  3. Description  ') + chalk.dim('→ decrire ce que tu veux construire'));
+    console.log(chalk.bold('  4. Spec         ') + chalk.dim('→ l\'IA redige la specification fonctionnelle'));
+    console.log(chalk.bold('  5. Plan         ') + chalk.dim('→ l\'IA genere le plan technique + stack'));
+    console.log(chalk.bold('  6. Taches       ') + chalk.dim('→ l\'IA decompose en taches ordonnees'));
+    console.log(chalk.bold('  7. Code         ') + chalk.dim('→ l\'IA genere tous les fichiers du projet'));
+    console.log('');
+    console.log(chalk.cyan('  ── NAVIGATION ───────────────────────────────────'));
+    console.log(chalk.white('  Tapez un numero  ') + chalk.dim('→ selectionner une option'));
+    console.log(chalk.white('  Option 0         ') + chalk.dim('→ retourner a l\'etape precedente'));
+    console.log(chalk.white('  Ctrl+C           ') + chalk.dim('→ annuler et quitter'));
+    console.log('');
+    console.log(chalk.cyan('  ── CONSEILS ─────────────────────────────────────'));
+    console.log(chalk.dim('  → Plus ta description est precise, meilleur est le code genere'));
+    console.log(chalk.dim('  → Tu peux valider, regenerer ou modifier chaque etape'));
+    console.log(chalk.dim('  → Si tu fermes le terminal : sandykit dev --resume pour reprendre'));
+    console.log(chalk.dim('  → Le resultat est dans specs/001-nom-projet/'));
+    console.log('');
+    console.log(chalk.cyan('  ══════════════════════════════════════════════════\n'));
+  }
+
+  function showAllCommands(): void {
+    console.log('');
+    console.log(chalk.cyan('  ══════════════════════════════════════════════════'));
+    console.log(chalk.bold.white('  TOUTES LES COMMANDES SANDYKIT'));
+    console.log(chalk.cyan('  ══════════════════════════════════════════════════'));
+    console.log('');
+    console.log(chalk.bold.yellow('  PIPELINE'));
+    console.log(chalk.white('  sandykit dev              ') + chalk.dim('→ generer un projet complet'));
+    console.log(chalk.white('  sandykit dev --resume     ') + chalk.dim('→ reprendre une session interrompue'));
+    console.log(chalk.white('  sandykit dev --dry-run    ') + chalk.dim('→ spec + plan sans ecrire de code'));
+    console.log(chalk.white('  sandykit dev --pr         ') + chalk.dim('→ creer une PR apres generation'));
+    console.log(chalk.white('  sandykit add [desc]       ') + chalk.dim('→ ajouter une feature a un projet existant'));
+    console.log('');
+    console.log(chalk.bold.yellow('  PROJET'));
+    console.log(chalk.white('  sandykit init             ') + chalk.dim('→ installer dans un projet (slash commands)'));
+    console.log(chalk.white('  sandykit status           ') + chalk.dim('→ etat de toutes les features'));
+    console.log(chalk.white('  sandykit list             ') + chalk.dim('→ liste detaillee avec progression'));
+    console.log(chalk.white('  sandykit watch            ') + chalk.dim('→ surveillance en temps reel'));
+    console.log('');
+    console.log(chalk.bold.yellow('  BUDGET IA'));
+    console.log(chalk.white('  sandykit budget show      ') + chalk.dim('→ voir les depenses du mois'));
+    console.log(chalk.white('  sandykit budget set 10    ') + chalk.dim('→ fixer limite mensuelle en $'));
+    console.log(chalk.white('  sandykit budget reset     ') + chalk.dim('→ reinitialiser les depenses'));
+    console.log('');
+    console.log(chalk.bold.yellow('  EQUIPE'));
+    console.log(chalk.white('  sandykit team init        ') + chalk.dim('→ configurer le mode equipe'));
+    console.log(chalk.white('  sandykit team show        ') + chalk.dim('→ voir la configuration equipe'));
+    console.log(chalk.white('  sandykit team add         ') + chalk.dim('→ ajouter un membre'));
+    console.log('');
+    console.log(chalk.bold.yellow('  PARTAGE & EXPORT'));
+    console.log(chalk.white('  sandykit share [f] --spec ') + chalk.dim('→ partager la spec via Gist'));
+    console.log(chalk.white('  sandykit share [f] --all  ') + chalk.dim('→ partager spec + plan + taches'));
+    console.log(chalk.white('  sandykit tickets [f] --jira   ') + chalk.dim('→ exporter vers Jira'));
+    console.log(chalk.white('  sandykit tickets [f] --linear ') + chalk.dim('→ exporter vers Linear'));
+    console.log('');
+    console.log(chalk.bold.yellow('  SLASH COMMANDS  (dans Claude Code / Cursor)'));
+    console.log(chalk.white('  /sandykit.specify         ') + chalk.dim('→ generer la specification'));
+    console.log(chalk.white('  /sandykit.clarify         ') + chalk.dim('→ affiner la specification'));
+    console.log(chalk.white('  /sandykit.plan            ') + chalk.dim('→ generer le plan technique'));
+    console.log(chalk.white('  /sandykit.tasks           ') + chalk.dim('→ decomposer en taches'));
+    console.log(chalk.white('  /sandykit.implement       ') + chalk.dim('→ implementer le code'));
+    console.log(chalk.white('  /sandykit.review          ') + chalk.dim('→ revue de code'));
+    console.log(chalk.white('  /sandykit.back            ') + chalk.dim('→ revenir a l\'etape precedente'));
+    console.log('');
+    console.log(chalk.cyan('  ══════════════════════════════════════════════════\n'));
+  }
+
+  // ── Choix du template de projet (menu 2 niveaux avec retour) ──
+  const savedCfg = loadConfig();
+  const providerLine = savedCfg?.provider
+    ? `${savedCfg.provider.type}  ${savedCfg.provider.model ?? ''}`
+    : 'non configure';
+
+  const CATEGORIES = [
+    { value: 'frontend'  as const, label: 'Frontend   —  React, Next.js, Dashboard, Landing Page' },
+    { value: 'backend'   as const, label: 'Backend    —  API REST, GraphQL, Microservice'         },
+    { value: 'fullstack' as const, label: 'Fullstack  —  SaaS complet, Monorepo Turborepo'        },
+    { value: 'mobile'    as const, label: 'Mobile     —  React Native + Expo'                     },
+    { value: 'data-ai'   as const, label: 'Data & IA  —  Agent LLM, RAG, Pipeline ML'             },
+    { value: 'tools'     as const, label: 'Outils     —  CLI npm, Extension VS Code'              },
+    { value: 'custom'    as const, label: 'Projet personnalise  —  stack choisie par l\'IA'       },
+    { value: 'provider'  as const, label: `[P] Provider IA  —  actuel : ${providerLine}`          },
+    { value: 'help'      as const, label: '[?] Aide   —  comment ca marche, navigation, conseils' },
+    { value: 'cmds'      as const, label: '[C] Commandes  —  toutes les commandes sandykit'       },
+  ];
+
+  const clearScreen = () => process.stdout.write('\x1Bc');
+
+  // Pause après affichage d'un écran d'info (sinon clearScreen efface immédiatement)
+  async function pauseAndContinue(): Promise<void> {
+    await p.text({ message: chalk.dim('Appuie sur Entree pour revenir au menu...') });
+  }
+
+  let template: ProjectTemplate | undefined;
+  while (!template) {
+    clearScreen();
+    showBanner();
+    const catChoice = await numMenu('Categorie de projet :', CATEGORIES);
+    if (p.isCancel(catChoice)) { p.cancel('Annulé'); return; }
+
+    if (catChoice === 'provider') {
+      // Configurer le provider directement depuis le menu de départ
+      clearScreen();
+      p.intro(chalk.bold('Configuration du provider IA'));
+      const tempState: DevState = {};
+      const provRes = await stepProvider(tempState);
+      if (provRes.action === 'next') {
+        const { apiKey, ...cfgWithoutKey } = provRes.data;
+        if (apiKey) await storeApiKey(provRes.data.type, apiKey);
+        const existingCfg = loadConfig();
+        saveConfig({ ...(existingCfg ?? {}), provider: cfgWithoutKey });
+        console.log(chalk.green(`\n  Provider sauvegarde : ${provRes.data.type} — ${provRes.data.model ?? 'modele par defaut'}\n`));
+        await pauseAndContinue();
+      }
+      continue;
+    }
+    if (catChoice === 'help')  { clearScreen(); showHelp();        await pauseAndContinue(); continue; }
+    if (catChoice === 'cmds')  { clearScreen(); showAllCommands(); await pauseAndContinue(); continue; }
+    if (catChoice === '__back__') continue;
+
+    if (catChoice === 'custom') {
+      template = PROJECT_TEMPLATES.find(t => t.id === 'custom')!;
+      break;
+    }
+
+    clearScreen();
+    const catLabel = CATEGORIES.find(c => c.value === catChoice)?.label ?? catChoice;
+    console.log(chalk.cyan(`\n  ${catLabel}\n`));
+
+    const categoryTemplates = PROJECT_TEMPLATES.filter(t => t.category === catChoice);
+    const typeChoice = await numMenu(
+      'Type de projet :',
+      categoryTemplates.map(t => ({ value: t.id, label: t.label })),
+      'Retour aux categories'
+    );
+    if (p.isCancel(typeChoice) || typeChoice === '__back__') continue;
+    template = PROJECT_TEMPLATES.find(t => t.id === typeChoice as string)!;
+  }
+  clearScreen();
 
   // ── Team config : defaults partagés ──
   const teamCfg = loadTeamConfig(process.cwd());
-  const state: DevState & { stack?: typeof stack; template?: ProjectTemplate } = {
+  const state: DevState & { stack?: typeof stack; template?: ProjectTemplate; ragContext?: typeof ragContext } = {
     stack,
     template,
     autoGit: teamCfg?.autoCommit ?? true,
     webhookUrl: teamCfg?.hooks?.webhook,
+    ragContext,
   };
   let step = 0;
 
   const cp = loadCheckpoint();
   if (cp && !opts.resume) {
-    const resume = await p.select({
-      message: `Session précédente trouvée : ${describeCheckpoint(cp)}`,
-      options: [
-        { value: 'resume', label: '▶  Reprendre depuis là où j\'ai arrêté' },
-        { value: 'new',    label: '✦  Nouveau projet (ignorer le checkpoint)' },
-      ],
-    });
-    if (!p.isCancel(resume) && resume === 'resume') {
+    const resume = await numMenu(`Session precedente trouvee : ${describeCheckpoint(cp)}`, [
+      { value: 'resume', label: 'Reprendre depuis la ou j\'ai arrete' },
+      { value: 'new',    label: 'Nouveau projet (ignorer le checkpoint)' },
+    ]);
+    if (!p.isCancel(resume) && resume !== '__back__' && resume === 'resume') {
       state.providerCfg = cp.providerCfg;
       state.projectName = cp.projectName;
       state.featureDir  = cp.featureDir;
@@ -521,12 +750,14 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
       case 0: { // Provider
         const res = await stepProvider(state);
         if (res.action === 'cancel') return;
+        if (res.action === 'back') {
+          // Retour au menu de selection de categorie
+          return runDev(opts);
+        }
         if (res.action === 'next') {
           state.providerCfg = res.data;
-          // Stocker la clé API dans le keychain OS
           if (res.data.apiKey) await storeApiKey(res.data.type, res.data.apiKey);
           const existingCfg = loadConfig();
-          // Ne pas sauvegarder la clé en clair dans config.json
           saveConfig({ ...(existingCfg ?? {}), provider: { ...res.data, apiKey: undefined } });
           step++;
         }
@@ -666,11 +897,8 @@ export async function runDev(opts: { file?: string; resume?: boolean; dryRun?: b
         if (res.action === 'back') { step--; break; }
         if (res.action === 'next') {
           // ── Génération de tests ──
-          const genTests = await p.confirm({
-            message: 'Générer les tests automatiquement ?',
-            initialValue: true,
-          });
-          if (!p.isCancel(genTests) && genTests) {
+          const genTests = await askConfirm('Generer les tests automatiquement ?');
+          if (genTests) {
             const testSpinner = p.spinner();
             testSpinner.start('Génération des tests...');
             let testCode = '';

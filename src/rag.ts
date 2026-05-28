@@ -36,10 +36,13 @@ const EXCLUDE_FILES = new Set([
 const MAX_FILE_SIZE = 50_000; // 50KB max par fichier
 const MAX_TOTAL_TOKENS = 8_000; // Budget token pour le contexte RAG
 const APPROX_CHARS_PER_TOKEN = 4;
+const MAX_FILES = 300; // Limite de fichiers pour éviter de scanner des dossiers énormes
 
 // ─── Collecte des fichiers ────────────────────────────────────────────────────
 
 function collectFiles(dir: string, rootDir: string, results: string[] = []): string[] {
+  if (results.length >= MAX_FILES) return results;
+
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -48,6 +51,7 @@ function collectFiles(dir: string, rootDir: string, results: string[] = []): str
   }
 
   for (const entry of entries) {
+    if (results.length >= MAX_FILES) break;
     if (EXCLUDE_DIRS.has(entry) || EXCLUDE_FILES.has(entry)) continue;
     const fullPath = join(dir, entry);
     try {
